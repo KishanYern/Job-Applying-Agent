@@ -101,7 +101,7 @@ def add_log(message: str, level: str = "info"):
     st.session_state.agent_logs.append(f"[{timestamp}] {icon} {message}")
 
 
-async def run_agent_async(job_url: str, model_name: str):
+async def run_agent_async(job_url: str, resume_path: str, model_name: str):
     """Run the job application agent asynchronously."""
     try:
         # Import the agent module
@@ -109,12 +109,14 @@ async def run_agent_async(job_url: str, model_name: str):
         
         add_log(f"Starting agent with model: {model_name}", "action")
         add_log(f"Target URL: {job_url}", "info")
+        add_log(f"Resume: {resume_path}", "info")
         
         st.session_state.agent_status = "running"
         
         # Run the agent
         result = await run_agent(
             job_url=job_url,
+            resume_path=resume_path,
             profile_path=str(Path(__file__).parent / "my_profile.md"),
             model_name=model_name,
             log_callback=add_log
@@ -206,19 +208,20 @@ def main():
             help="Paste the direct link to the job application page"
         )
         
-        # Optional: Resume Upload (for reference, primary data from my_profile.md)
-        with st.expander("📎 Upload Resume (Optional)", expanded=False):
-            uploaded_file = st.file_uploader(
-                "Upload your resume PDF for reference",
-                type=["pdf"],
-                help="The agent primarily uses my_profile.md, but can reference your PDF"
-            )
-            if uploaded_file:
-                # Save to temp location
-                temp_path = Path(__file__).parent / "data" / "uploaded_resume.pdf"
-                temp_path.parent.mkdir(exist_ok=True)
-                temp_path.write_bytes(uploaded_file.getvalue())
-                st.success(f"✓ Saved to {temp_path}")
+        # Resume Upload (required for job applications)
+        uploaded_file = st.file_uploader(
+            "📎 Upload Resume (PDF)",
+            type=["pdf"],
+            help="Required: Your resume PDF will be uploaded to job applications"
+        )
+        resume_path = None
+        if uploaded_file:
+            # Save to temp location
+            temp_path = Path(__file__).parent / "data" / "uploaded_resume.pdf"
+            temp_path.parent.mkdir(exist_ok=True)
+            temp_path.write_bytes(uploaded_file.getvalue())
+            resume_path = str(temp_path)
+            st.success(f"✓ Resume ready: {uploaded_file.name}")
         
         # Control Buttons
         st.markdown("---")
@@ -226,7 +229,7 @@ def main():
         button_col1, button_col2, button_col3 = st.columns(3)
         
         with button_col1:
-            start_disabled = st.session_state.agent_running or not job_url
+            start_disabled = st.session_state.agent_running or not job_url or not resume_path
             if st.button("🚀 Start Agent", disabled=start_disabled, use_container_width=True):
                 st.session_state.agent_running = True
                 st.session_state.agent_logs = []
@@ -236,9 +239,13 @@ def main():
                 # Run the async agent
                 # nest_asyncio.apply() at module level allows asyncio.run() to work
                 # even when Streamlit's event loop is already running
-                asyncio.run(run_agent_async(job_url, model_name))
+                asyncio.run(run_agent_async(job_url, resume_path, model_name))
                 
                 st.rerun()
+            
+            # Show hint if resume not uploaded
+            if not resume_path and job_url:
+                st.caption("⚠️ Upload resume to enable")
         
         with button_col2:
             if st.button("⏸️ Pause Agent", disabled=not st.session_state.agent_running, use_container_width=True):

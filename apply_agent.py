@@ -75,12 +75,13 @@ If asked about salary expectations:
 - Handle multi-page applications by clicking "Next" or "Continue".
 - Watch for confirmation messages to know when you've completed sections.
 
-You are applying as: {profile_content.split('Name:')[1].split('\\n')[0].strip() if 'Name:' in profile_content else 'the candidate'}
+You are applying as: {profile_content.split('Name:')[1].split('\n')[0].strip() if 'Name:' in profile_content else 'the candidate'}
 """
 
 
 async def run_agent(
     job_url: str,
+    resume_path: str,
     profile_path: str,
     model_name: str = "llama3.1",
     log_callback: Optional[LogCallback] = None
@@ -90,6 +91,7 @@ async def run_agent(
     
     Args:
         job_url: The URL of the job posting/application page.
+        resume_path: Path to the resume PDF file.
         profile_path: Path to the my_profile.md file.
         model_name: The Ollama model to use (default: llama3.1).
         log_callback: Optional callback function for logging (message, level).
@@ -127,23 +129,36 @@ async def run_agent(
         
         # Create the task for the agent
         task = f"""
-        Navigate to: {job_url}
-        
-        Your mission:
-        1. Find and click the "Apply" or application button if needed.
-        2. Fill out ALL form fields using the candidate profile data.
-        3. For complex questions (like "Why this company?"), use the research protocol.
-        4. Navigate through all pages of the application.
-        5. STOP before the final submit button and notify the user for review.
-        
-        Remember: NEVER submit without user confirmation. STOP if you see CAPTCHA or login.
-        """
+NAVIGATE TO: {job_url}
+
+YOUR GOAL: 
+Complete the job application form up to the review stage. DO NOT SUBMIT.
+
+CANDIDATE PROFILE (Source of Truth):
+{profile_content}
+
+EXECUTION STEPS:
+1. **Login/Start:** If a login is required, look for "Apply without account" or "Apply with Resume". If blocked by a complex login, PAUSE and ask user.
+2. **Resume Upload:** Upload the file at: "{resume_path}".
+3. **Form Filling:** - Map profile data to fields (e.g., "Experience" -> "Reynolds and Reynolds").
+   - If a field asks for "Desired Salary" and it's not in the profile, OPEN A NEW TAB, search "average salary for [Role] at [Company]", extract the number, close tab, and fill it.
+   - If a field asks "Why do you want to work here?", OPEN A NEW TAB, read the company's "About Us", and synthesize a short answer connecting their values to my "Thematic Interests" (in profile).
+4. **Review:** Click "Next" until you reach the "Review" or "Final Submit" page.
+5. **HALT:** Stop immediately upon reaching the final page. notify the user: "Application ready for review."
+
+CRITICAL RULES:
+- **NO SUBMITTING:** Never click "Submit Application".
+- **CAPTCHAS:** If you see a CAPTCHA, stop and alert the user.
+- **PRIVACY:** Do not hallucinate personal data. Use *only* what is in the profile.
+"""
         
         # Initialize and run the browser-use agent
+        # Note: Type ignore needed due to langchain type stub version mismatch
         agent = Agent(
             task=task,
-            llm=llm,
-            browser_config={
+            llm=llm,  # type: ignore[arg-type]
+            extend_system_message=system_prompt,  # Inject candidate profile + instructions
+            browser_context_kwargs={
                 "headless": False,  # Show the browser so user can watch/intervene
             }
         )
@@ -181,19 +196,22 @@ async def run_agent(
 if __name__ == "__main__":
     import sys
     
-    if len(sys.argv) < 2:
-        print("Usage: python apply_agent.py <job_url>")
-        print("Example: python apply_agent.py https://boards.greenhouse.io/company/jobs/123")
+    if len(sys.argv) < 3:
+        print("Usage: python apply_agent.py <job_url> <resume_path>")
+        print("Example: python apply_agent.py https://boards.greenhouse.io/company/jobs/123 /path/to/resume.pdf")
         sys.exit(1)
     
     job_url = sys.argv[1]
+    resume_path = sys.argv[2]
     profile_path = Path(__file__).parent / "my_profile.md"
     
     print(f"Starting agent for: {job_url}")
     print(f"Using profile: {profile_path}")
+    print(f"Using resume: {resume_path}")
     
     result = asyncio.run(run_agent(
         job_url=job_url,
+        resume_path=resume_path,
         profile_path=str(profile_path),
         model_name="llama3.1"
     ))
