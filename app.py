@@ -8,6 +8,10 @@ import asyncio
 import sys
 from pathlib import Path
 
+# Enable nested async event loops (required for Streamlit + async browser-use)
+import nest_asyncio
+nest_asyncio.apply()
+
 # Page configuration
 st.set_page_config(
     page_title="AI Job Application Agent",
@@ -230,14 +234,9 @@ def main():
                 add_log("Initializing agent...", "info")
                 
                 # Run the async agent
-                # Note: Streamlit's asyncio handling
-                try:
-                    asyncio.run(run_agent_async(job_url, model_name))
-                except RuntimeError:
-                    # If event loop already running, use nest_asyncio approach
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(run_agent_async(job_url, model_name))
+                # nest_asyncio.apply() at module level allows asyncio.run() to work
+                # even when Streamlit's event loop is already running
+                asyncio.run(run_agent_async(job_url, model_name))
                 
                 st.rerun()
         
