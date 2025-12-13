@@ -69,10 +69,10 @@ class RepoConfig:
 
 # Pre-configured repositories for job hunting
 DEFAULT_REPOS: list[RepoConfig] = [
-    # SimplifyJobs - Gold standard lists
+    # SimplifyJobs - Gold standard lists (Summer 2026)
     RepoConfig(
         owner="SimplifyJobs",
-        repo="Summer2025-Internships",
+        repo="Summer2026-Internships",
         branch="dev",
         job_type="internship"
     ),
@@ -82,14 +82,14 @@ DEFAULT_REPOS: list[RepoConfig] = [
         branch="dev",
         job_type="new-grad"
     ),
-    # Pitt CSC - Large student-maintained list
+    # Pitt CSC - Now redirects to SimplifyJobs (Summer 2026)
     RepoConfig(
         owner="pittcsc",
-        repo="Summer2025-Internships",
+        repo="Summer2026-Internships",
         branch="dev",
         job_type="internship"
     ),
-    # Ouckah - Active list with applied checkboxes
+    # Ouckah - Active list with markdown tables (Summer 2025 still active for some)
     RepoConfig(
         owner="Ouckah",
         repo="Summer2025-Internships",
@@ -108,9 +108,7 @@ SWE_AI_DS_KEYWORDS = [
     "nlp", "natural language", "computer vision", "cv", "robotics",
     # Data Science
     "data scientist", "data science", "data analyst", "analytics", "data engineer",
-    "quantitative", "quant", "research scientist", "applied scientist",
-    # General Tech
-    "systems", "infrastructure", "cloud", "devops", "security", "embedded",
+    "quantitative", "quant", "research scientist", "applied scientist"
 ]
 
 
@@ -203,6 +201,76 @@ class JobScraper:
         
         return listings
     
+    def parse_html_table(self, content: str, repo: RepoConfig) -> list[JobListing]:
+        """Parse HTML table rows (used by SimplifyJobs/pittcsc repos)."""
+        listings: list[JobListing] = []
+        
+        # Match HTML table rows: <tr><td>...</td><td>...</td>...</tr>
+        # Handle <td> with or without style attributes
+        # SimplifyJobs format: Company | Role | Location | Application Link | Age
+        row_pattern = r'<tr>\s*<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>'
+        
+        for match in re.finditer(row_pattern, content, re.DOTALL | re.IGNORECASE):
+            company_cell = match.group(1)
+            role_cell = match.group(2)
+            location_cell = match.group(3)
+            link_cell = match.group(4)
+            
+            # Skip continuation rows (↳ symbol)
+            if '↳' in company_cell:
+                # For continuation rows, company is inherited - skip for now
+                continue
+            
+            company = self._clean_cell(company_cell)
+            role = self._clean_cell(role_cell)
+            location = self._clean_cell(location_cell)
+            
+            # Skip closed positions (🔒 emoji in the row)
+            full_row = match.group(0)
+            if '🔒' in full_row:
+                continue
+            
+            # Skip empty companies
+            if not company or company == '↳':
+                continue
+            
+            # Extract URL from the link cell (look for actual job application link, not Simplify)
+            apply_url = self._extract_job_url_from_html(link_cell)
+            if not apply_url:
+                continue
+            
+            # Skip non-job URLs
+            if any(skip in apply_url.lower() for skip in ['github.com', 'linkedin.com/company', 'twitter.com', 'simplify.jobs/p/']):
+                continue
+            
+            listing = JobListing(
+                company=company,
+                role=role,
+                location=location,
+                apply_url=apply_url,
+                source_repo=repo.display_name
+            )
+            listings.append(listing)
+        
+        return listings
+    
+    def _extract_job_url_from_html(self, cell: str) -> str | None:
+        """Extract the actual job URL from HTML (not Simplify redirect links)."""
+        # Look for links that are NOT simplify.jobs (those are redirects)
+        # Pattern: <a href="https://actual-company-url...">
+        all_urls = re.findall(r'<a[^>]+href=["\']([^"\']+)["\']', cell, re.IGNORECASE)
+        
+        for url in all_urls:
+            # Skip Simplify redirect links, we want the actual company URL
+            if 'simplify.jobs' not in url.lower() and url.startswith('http'):
+                return url.split('?utm_source=')[0]  # Clean up tracking params but keep the base
+        
+        # Fallback: return first URL if no non-Simplify found
+        if all_urls:
+            return all_urls[0]
+        
+        return None
+    
     def _clean_cell(self, cell: str) -> str:
         """Clean a markdown table cell."""
         # Remove markdown links but keep text
@@ -235,7 +303,14 @@ class JobScraper:
         if not content:
             return []
         
+        # Try markdown tables first (Ouckah style)
         listings = self.parse_markdown_table(content, repo)
+        
+        # If no markdown tables found, try HTML tables (SimplifyJobs/pittcsc style)
+        # Check for '<table' to handle tables with attributes like <table style="...">
+        if not listings and '<table' in content.lower():
+            listings = self.parse_html_table(content, repo)
+        
         print(f"[INFO] Found {len(listings)} listings from {repo.display_name}")
         return listings
     

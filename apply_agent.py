@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from browser_use import Agent
 from langchain_ollama import ChatOllama
 
+# Local database for tracking applications
+from application_db import get_db, ApplicationStatus
+
 # Type definitions
 LogCallback = Callable[[str, str], None]
 
@@ -21,6 +24,7 @@ class AgentResult:
     """Result of an agent run."""
     success: bool
     message: str
+    application_id: Optional[int] = None
     fields_filled: int = 0
     research_queries: int = 0
 
@@ -84,7 +88,10 @@ async def run_agent(
     resume_path: str,
     profile_path: str,
     model_name: str = "qwen2.5:7b",
-    log_callback: Optional[LogCallback] = None
+    log_callback: Optional[LogCallback] = None,
+    company: Optional[str] = None,
+    role: Optional[str] = None,
+    skip_duplicate_check: bool = False
 ) -> dict:
     """
     Run the job application agent.
@@ -95,9 +102,12 @@ async def run_agent(
         profile_path: Path to the my_profile.md file.
         model_name: The Ollama model to use (default: llama3.1).
         log_callback: Optional callback function for logging (message, level).
+        company: Company name (optional, for tracking).
+        role: Role title (optional, for tracking).
+        skip_duplicate_check: If True, skip duplicate URL check.
     
     Returns:
-        dict with 'success' (bool) and 'message' (str).
+        dict with 'success' (bool), 'message' (str), and 'application_id' (int).
     """
     
     def log(message: str, level: str = "info"):
@@ -106,7 +116,34 @@ async def run_agent(
             log_callback(message, level)
         print(f"[{level.upper()}] {message}")
     
+    db = get_db()
+    application_id = None
+    
     try:
+        # Check for duplicate application
+        if not skip_duplicate_check:
+            existing = db.get_application_by_url(job_url)
+            if existing:
+                log(f"⚠️ Already applied to this job on {existing.created_at.strftime('%Y-%m-%d')}", "warning")
+                return {
+                    "success": False,
+                    "message": f"Duplicate application: Already applied to {existing.company} - {existing.role}",
+                    "application_id": existing.id,
+                    "is_duplicate": True
+                }
+        
+        # Record application in database
+        application_id = db.add_application(
+            company=company or "Unknown Company",
+            role=role or "Unknown Role",
+            job_url=job_url,
+            status=ApplicationStatus.IN_PROGRESS,
+            resume_used=resume_path
+        )
+        
+        if application_id:
+            log(f"📝 Application #{application_id} recorded in database", "info")
+        
         # Load profile
         log("Loading candidate profile...", "info")
         profile_content = load_profile(profile_path)
@@ -170,26 +207,39 @@ CRITICAL RULES:
         
         log("Agent completed its run", "success")
         
+        # Update database status to completed
+        if application_id:
+            db.update_status(application_id, ApplicationStatus.COMPLETED)
+            log(f"✅ Application #{application_id} marked as completed", "success")
+        
         return {
             "success": True,
             "message": "Agent completed. Please review the application before submitting.",
+            "application_id": application_id,
             "result": result
         }
         
     except FileNotFoundError as e:
         log(f"Profile file error: {e}", "error")
-        return {"success": False, "message": str(e)}
+        if application_id:
+            db.update_status(application_id, ApplicationStatus.FAILED, notes=str(e))
+        return {"success": False, "message": str(e), "application_id": application_id}
     
     except ConnectionError:
         log("Could not connect to Ollama. Is it running?", "error")
+        if application_id:
+            db.update_status(application_id, ApplicationStatus.FAILED, notes="Ollama connection failed")
         return {
             "success": False, 
-            "message": "Ollama connection failed. Please ensure Ollama is running (ollama serve)."
+            "message": "Ollama connection failed. Please ensure Ollama is running (ollama serve).",
+            "application_id": application_id
         }
     
     except Exception as e:
         log(f"Unexpected error: {type(e).__name__}: {e}", "error")
-        return {"success": False, "message": f"Agent error: {str(e)}"}
+        if application_id:
+            db.update_status(application_id, ApplicationStatus.FAILED, notes=f"{type(e).__name__}: {e}")
+        return {"success": False, "message": f"Agent error: {str(e)}", "application_id": application_id}
 
 
 # For testing the agent directly

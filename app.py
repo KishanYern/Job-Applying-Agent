@@ -5,12 +5,17 @@ A privacy-focused, automated job application tool running entirely on local hard
 
 import streamlit as st
 import asyncio
-import sys
+import time
 from pathlib import Path
+from datetime import datetime
 
 # Enable nested async event loops (required for Streamlit + async browser-use)
 import nest_asyncio
 nest_asyncio.apply()
+
+# Local imports
+from application_db import get_db, ApplicationStatus
+from job_scraper import get_job_urls_sync, JobListing
 
 # Page configuration
 st.set_page_config(
@@ -34,28 +39,19 @@ st.markdown("""
         color: #6B7280;
         margin-bottom: 2rem;
     }
-    .status-box {
+    .job-card {
+        background-color: #F9FAFB;
         padding: 1rem;
         border-radius: 0.5rem;
-        margin: 1rem 0;
+        border-left: 4px solid #3B82F6;
+        margin: 0.5rem 0;
     }
-    .status-running {
-        background-color: #FEF3C7;
-        border-left: 4px solid #F59E0B;
-    }
-    .status-success {
-        background-color: #D1FAE5;
-        border-left: 4px solid #10B981;
-    }
-    .status-error {
-        background-color: #FEE2E2;
-        border-left: 4px solid #EF4444;
-    }
-    .info-card {
-        background-color: #F3F4F6;
-        padding: 1.5rem;
-        border-radius: 0.75rem;
-        margin: 1rem 0;
+    .queue-count {
+        background-color: #DBEAFE;
+        color: #1E40AF;
+        padding: 0.25rem 0.75rem;
+        border-radius: 1rem;
+        font-weight: 600;
     }
     .stButton>button {
         width: 100%;
@@ -82,7 +78,15 @@ def init_session_state():
     if "agent_logs" not in st.session_state:
         st.session_state.agent_logs = []
     if "agent_status" not in st.session_state:
-        st.session_state.agent_status = "idle"  # idle, running, success, error, paused
+        st.session_state.agent_status = "idle"
+    if "scraped_jobs" not in st.session_state:
+        st.session_state.scraped_jobs = []
+    if "auto_apply_running" not in st.session_state:
+        st.session_state.auto_apply_running = False
+    if "current_job_index" not in st.session_state:
+        st.session_state.current_job_index = 0
+    if "auto_apply_paused" not in st.session_state:
+        st.session_state.auto_apply_paused = False
 
 
 def load_profile() -> str:
@@ -93,61 +97,50 @@ def load_profile() -> str:
     return ""
 
 
+def get_resume_path() -> str | None:
+    """Get the default resume path."""
+    repo_resume_path = Path(__file__).parent / "Kishan_Yerneni_Resume.pdf"
+    if repo_resume_path.exists():
+        return str(repo_resume_path)
+    return None
+
+
 def add_log(message: str, level: str = "info"):
     """Add a log message to the session state."""
-    import datetime
-    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    timestamp = datetime.now().strftime("%H:%M:%S")
     icon = {"info": "ℹ️", "success": "✅", "warning": "⚠️", "error": "❌", "action": "🤖"}.get(level, "ℹ️")
     st.session_state.agent_logs.append(f"[{timestamp}] {icon} {message}")
 
 
-async def run_agent_async(job_url: str, resume_path: str, model_name: str):
-    """Run the job application agent asynchronously."""
+async def run_agent_for_job(
+    job_url: str,
+    resume_path: str,
+    model_name: str,
+    company: str = None,
+    role: str = None,
+    skip_duplicate: bool = False
+) -> dict:
+    """Run the job application agent for a single job."""
     try:
-        # Import the agent module
         from apply_agent import run_agent
         
-        add_log(f"Starting agent with model: {model_name}", "action")
-        add_log(f"Target URL: {job_url}", "info")
-        add_log(f"Resume: {resume_path}", "info")
-        
-        st.session_state.agent_status = "running"
-        
-        # Run the agent
         result = await run_agent(
             job_url=job_url,
             resume_path=resume_path,
             profile_path=str(Path(__file__).parent / "my_profile.md"),
             model_name=model_name,
-            log_callback=add_log
+            log_callback=add_log,
+            company=company,
+            role=role,
+            skip_duplicate_check=skip_duplicate
         )
-        
-        if result.get("success"):
-            st.session_state.agent_status = "success"
-            add_log("Agent completed successfully!", "success")
-        else:
-            st.session_state.agent_status = "error"
-            add_log(f"Agent stopped: {result.get('message', 'Unknown error')}", "error")
-            
-    except ImportError:
-        st.session_state.agent_status = "error"
-        add_log("Agent module not found. Please ensure apply_agent.py exists.", "error")
+        return result
     except Exception as e:
-        st.session_state.agent_status = "error"
-        add_log(f"Agent error: {str(e)}", "error")
-    finally:
-        st.session_state.agent_running = False
+        return {"success": False, "message": str(e)}
 
 
-def main():
-    """Main application entry point."""
-    init_session_state()
-    
-    # Header
-    st.markdown('<p class="main-header">🤖 AI Job Application Agent</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Privacy-focused automation running 100% locally with Llama 3.1</p>', unsafe_allow_html=True)
-    
-    # Sidebar - Configuration
+def render_sidebar(model_name_key: str = "model_select"):
+    """Render the sidebar with configuration options."""
     with st.sidebar:
         st.header("⚙️ Configuration")
         
@@ -156,7 +149,8 @@ def main():
             "Select LLM Model",
             options=["qwen2.5:7b", "llama3.1", "llama3.1:8b", "llama3.2", "llama3.2:3b"],
             index=0,
-            help="Choose the Ollama model for the agent's reasoning"
+            help="Choose the Ollama model for the agent's reasoning",
+            key=model_name_key
         )
         
         st.divider()
@@ -167,136 +161,543 @@ def main():
         if profile_content:
             with st.expander("View Profile Data", expanded=False):
                 st.text(profile_content[:2000] + "..." if len(profile_content) > 2000 else profile_content)
-            st.success("✓ Profile loaded from my_profile.md")
+            st.success("✓ Profile loaded")
         else:
             st.error("⚠️ my_profile.md not found!")
-            st.info("Create a my_profile.md file with your resume data.")
+        
+        # Resume status
+        resume_path = get_resume_path()
+        if resume_path:
+            st.success("✓ Resume found")
+        else:
+            st.error("⚠️ Resume not found!")
         
         st.divider()
         
-        # System Status
-        st.header("📊 System Status")
+        # Application Statistics
+        st.header("📊 Stats")
+        db = get_db()
+        stats = db.get_statistics()
         
-        # Check Ollama status (simplified check)
-        ollama_status = st.empty()
-        ollama_status.info("🔄 Ollama: Checking...")
-        # In a real implementation, we'd ping Ollama here
-        ollama_status.success("✓ Ollama: Ready")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total", stats["total"])
+        with col2:
+            st.metric("This Week", stats["last_7_days"])
+        
+        # Queue count
+        queued = stats.get("by_status", {}).get("queued", 0)
+        if queued > 0:
+            st.info(f"📋 **{queued}** jobs in queue")
         
         st.divider()
         
-        # Instructions
-        st.header("📖 How to Use")
+        # Quick links
+        st.header("📖 Mode Guide")
         st.markdown("""
-        1. **Paste** a GitHub job board URL
-        2. **Click** "Start Agent"
-        3. **Watch** the browser automation
-        4. **Intervene** if CAPTCHA appears
-        5. **Review** before final submission
+        - **🔍 Discover**: Find jobs from GitHub
+        - **🚀 Auto-Apply**: Batch apply to queue
+        - **📝 Manual**: Apply to single URL
+        - **📚 History**: Track applications
         """)
     
-    # Main Content Area
-    col1, col2 = st.columns([2, 1])
+    return model_name
+
+
+def render_discover_tab():
+    """Render the job discovery tab."""
+    st.header("🔍 Discover Jobs")
+    st.markdown("Find jobs from curated GitHub repositories (SimplifyJobs, Ouckah, pittcsc)")
+    
+    # Search filters
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.header("🎯 Job Application")
-        
-        # Job URL Input
-        job_url = st.text_input(
-            "Job Posting URL",
-            placeholder="https://boards.greenhouse.io/company/jobs/123456",
-            help="Paste the direct link to the job application page"
+        job_type = st.selectbox(
+            "Job Type",
+            options=["internship", "new-grad", "all"],
+            index=0
         )
-        
-        # Resume Upload (required for job applications)
-        uploaded_file = st.file_uploader(
-            "📎 Upload Resume (PDF)",
-            type=["pdf"],
-            help="Required: Your resume PDF will be uploaded to job applications"
-        )
-        resume_path = None
-        if uploaded_file:
-            # Save to temp location
-            temp_path = Path(__file__).parent / "data" / "uploaded_resume.pdf"
-            temp_path.parent.mkdir(exist_ok=True)
-            temp_path.write_bytes(uploaded_file.getvalue())
-            resume_path = str(temp_path)
-            st.success(f"✓ Resume ready: {uploaded_file.name}")
-        
-        # Control Buttons
-        st.markdown("---")
-        
-        button_col1, button_col2, button_col3 = st.columns(3)
-        
-        with button_col1:
-            start_disabled = st.session_state.agent_running or not job_url or not resume_path
-            if st.button("🚀 Start Agent", disabled=start_disabled, use_container_width=True):
-                st.session_state.agent_running = True
-                st.session_state.agent_logs = []
-                st.session_state.agent_status = "running"
-                add_log("Initializing agent...", "info")
-                
-                # Run the async agent
-                # nest_asyncio.apply() at module level allows asyncio.run() to work
-                # even when Streamlit's event loop is already running
-                asyncio.run(run_agent_async(job_url, resume_path, model_name))
-                
-                st.rerun()
-            
-            # Show hint if resume not uploaded
-            if not resume_path and job_url:
-                st.caption("⚠️ Upload resume to enable")
-        
-        with button_col2:
-            if st.button("⏸️ Pause Agent", disabled=not st.session_state.agent_running, use_container_width=True):
-                st.session_state.agent_status = "paused"
-                add_log("Agent paused by user", "warning")
-        
-        with button_col3:
-            if st.button("🔄 Reset", use_container_width=True):
-                st.session_state.agent_running = False
-                st.session_state.agent_logs = []
-                st.session_state.agent_status = "idle"
-                st.rerun()
     
     with col2:
-        st.header("📋 Status")
+        location_filter = st.text_input(
+            "Location Filter",
+            placeholder="e.g., Remote, Houston, CA",
+            help="Comma-separated locations (leave empty for all)"
+        )
+    
+    with col3:
+        keyword_filter = st.text_input(
+            "Role Keywords",
+            placeholder="e.g., machine learning, backend",
+            help="Comma-separated keywords (leave empty for default SWE/AI/DS)"
+        )
+    
+    # Search button
+    col_btn1, col_btn2 = st.columns([1, 3])
+    with col_btn1:
+        search_clicked = st.button("🔍 Search Jobs", use_container_width=True)
+    
+    if search_clicked:
+        with st.spinner("Fetching jobs from GitHub repositories..."):
+            locations = [l.strip() for l in location_filter.split(",")] if location_filter else None
+            keywords = [k.strip() for k in keyword_filter.split(",")] if keyword_filter else None
+            
+            jobs = get_job_urls_sync(
+                keywords=keywords,
+                locations=locations,
+                job_type=job_type if job_type != "all" else None
+            )
+            st.session_state.scraped_jobs = jobs
+    
+    # Display results
+    jobs = st.session_state.scraped_jobs
+    
+    if jobs:
+        st.success(f"Found **{len(jobs)}** matching jobs!")
         
-        # Status indicator
-        status = st.session_state.agent_status
-        if status == "idle":
-            st.info("⏳ **Ready** - Enter a job URL to begin")
-        elif status == "running":
-            st.warning("🔄 **Running** - Agent is working...")
-        elif status == "success":
-            st.success("✅ **Complete** - Review the application")
-        elif status == "error":
-            st.error("❌ **Error** - Check logs below")
-        elif status == "paused":
-            st.warning("⏸️ **Paused** - Human intervention needed")
+        # Queue controls
+        st.markdown("---")
+        col_q1, col_q2, col_q3 = st.columns(3)
+        
+        with col_q1:
+            num_to_queue = st.number_input("Jobs to queue", min_value=1, max_value=min(100, len(jobs)), value=min(10, len(jobs)))
+        
+        with col_q2:
+            st.write("")  # Spacing
+            st.write("")
+            if st.button(f"➕ Add {num_to_queue} to Queue", use_container_width=True):
+                db = get_db()
+                added = 0
+                skipped = 0
+                for job in jobs[:num_to_queue]:
+                    # Check if already in database
+                    if not db.is_duplicate(job.apply_url):
+                        db.add_application(
+                            company=job.company,
+                            role=job.role,
+                            job_url=job.apply_url,
+                            location=job.location,
+                            status=ApplicationStatus.QUEUED,
+                            source=job.source_repo
+                        )
+                        added += 1
+                    else:
+                        skipped += 1
+                st.success(f"✅ Added {added} jobs to queue ({skipped} duplicates skipped)")
+                st.rerun()
+        
+        with col_q3:
+            st.write("")
+            st.write("")
+            if st.button("➕ Add ALL to Queue", use_container_width=True):
+                db = get_db()
+                added = 0
+                skipped = 0
+                for job in jobs:
+                    if not db.is_duplicate(job.apply_url):
+                        db.add_application(
+                            company=job.company,
+                            role=job.role,
+                            job_url=job.apply_url,
+                            location=job.location,
+                            status=ApplicationStatus.QUEUED,
+                            source=job.source_repo
+                        )
+                        added += 1
+                    else:
+                        skipped += 1
+                st.success(f"✅ Added {added} jobs to queue ({skipped} duplicates skipped)")
+                st.rerun()
+        
+        # Job listings
+        st.markdown("---")
+        st.subheader(f"📋 Job Listings ({len(jobs)})")
+        
+        for i, job in enumerate(jobs[:50]):  # Show first 50
+            db = get_db()
+            is_duplicate = db.is_duplicate(job.apply_url)
+            
+            with st.expander(
+                f"{'✅' if is_duplicate else '🆕'} {job.company} - {job.role}",
+                expanded=False
+            ):
+                st.markdown(f"**Location:** {job.location}")
+                st.markdown(f"**Source:** {job.source_repo}")
+                st.markdown(f"**URL:** [{job.apply_url[:60]}...]({job.apply_url})")
+                
+                if is_duplicate:
+                    st.info("Already in database")
+                else:
+                    if st.button(f"➕ Add to Queue", key=f"add_{i}"):
+                        db.add_application(
+                            company=job.company,
+                            role=job.role,
+                            job_url=job.apply_url,
+                            location=job.location,
+                            status=ApplicationStatus.QUEUED,
+                            source=job.source_repo
+                        )
+                        st.success("Added to queue!")
+                        st.rerun()
+        
+        if len(jobs) > 50:
+            st.info(f"Showing 50 of {len(jobs)} jobs. Add to queue to process more.")
+    else:
+        st.info("Click 'Search Jobs' to discover opportunities from GitHub job boards.")
+
+
+def render_auto_apply_tab(model_name: str):
+    """Render the auto-apply tab."""
+    st.header("🚀 Auto-Apply Mode")
+    st.markdown("Automatically apply to all queued jobs. You only intervene for CAPTCHAs.")
     
-    # Agent Logs
-    st.header("📜 Agent Activity Log")
+    db = get_db()
+    queued_jobs = db.get_all_applications(status=ApplicationStatus.QUEUED, limit=500)
+    resume_path = get_resume_path()
     
-    log_container = st.container()
-    with log_container:
-        if st.session_state.agent_logs:
-            log_text = "\n".join(reversed(st.session_state.agent_logs[-50:]))  # Show last 50 logs
-            st.code(log_text, language=None)
+    # Status overview
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("📋 In Queue", len(queued_jobs))
+    with col2:
+        completed = len(db.get_all_applications(status=ApplicationStatus.COMPLETED, limit=1000))
+        st.metric("✅ Completed", completed)
+    with col3:
+        failed = len(db.get_all_applications(status=ApplicationStatus.FAILED, limit=1000))
+        st.metric("❌ Failed", failed)
+    
+    st.markdown("---")
+    
+    if not resume_path:
+        st.error("❌ No resume found! Please add your resume PDF to the project folder.")
+        return
+    
+    if not queued_jobs:
+        st.info("📭 No jobs in queue. Go to **Discover** tab to find and queue jobs.")
+        return
+    
+    # Queue preview
+    st.subheader(f"📋 Queue Preview (Next {min(10, len(queued_jobs))} jobs)")
+    for i, job in enumerate(queued_jobs[:10]):
+        st.markdown(f"{i+1}. **{job.company}** - {job.role} ({job.location or 'Unknown'})")
+    
+    if len(queued_jobs) > 10:
+        st.caption(f"... and {len(queued_jobs) - 10} more")
+    
+    st.markdown("---")
+    
+    # Control buttons
+    col_btn1, col_btn2, col_btn3 = st.columns(3)
+    
+    with col_btn1:
+        if not st.session_state.auto_apply_running:
+            if st.button("▶️ Start Auto-Apply", use_container_width=True, type="primary"):
+                st.session_state.auto_apply_running = True
+                st.session_state.auto_apply_paused = False
+                st.session_state.current_job_index = 0
+                st.session_state.agent_logs = []
+                add_log(f"Starting auto-apply for {len(queued_jobs)} jobs...", "action")
+                st.rerun()
         else:
-            st.markdown("""
-            <div class="info-card">
-                <p style="color: #6B7280; text-align: center;">
-                    No activity yet. Start the agent to see logs here.
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
+            if st.button("⏹️ Stop", use_container_width=True):
+                st.session_state.auto_apply_running = False
+                st.session_state.auto_apply_paused = False
+                add_log("Auto-apply stopped by user", "warning")
+                st.rerun()
+    
+    with col_btn2:
+        if st.session_state.auto_apply_running:
+            if st.session_state.auto_apply_paused:
+                if st.button("▶️ Resume", use_container_width=True):
+                    st.session_state.auto_apply_paused = False
+                    add_log("Resuming auto-apply...", "action")
+                    st.rerun()
+            else:
+                if st.button("⏸️ Pause", use_container_width=True):
+                    st.session_state.auto_apply_paused = True
+                    add_log("Auto-apply paused - solve CAPTCHA if needed", "warning")
+                    st.rerun()
+    
+    with col_btn3:
+        if st.button("🗑️ Clear Queue", use_container_width=True):
+            for job in queued_jobs:
+                db.update_status(job.id, ApplicationStatus.SKIPPED)
+            st.success("Queue cleared!")
+            st.rerun()
+    
+    # Auto-apply execution
+    if st.session_state.auto_apply_running and not st.session_state.auto_apply_paused:
+        st.markdown("---")
+        st.subheader("🤖 Agent Running...")
+        
+        # Progress bar
+        progress = st.progress(0)
+        status_text = st.empty()
+        
+        # Get fresh queue
+        queued_jobs = db.get_all_applications(status=ApplicationStatus.QUEUED, limit=500)
+        
+        if not queued_jobs:
+            st.session_state.auto_apply_running = False
+            st.success("🎉 All jobs processed!")
+            st.rerun()
+        
+        # Process next job
+        current_job = queued_jobs[0]
+        
+        status_text.markdown(f"**Applying to:** {current_job.company} - {current_job.role}")
+        add_log(f"Processing: {current_job.company} - {current_job.role}", "action")
+        
+        # Update status to in_progress
+        db.update_status(current_job.id, ApplicationStatus.IN_PROGRESS)
+        
+        # Run the agent
+        try:
+            result = asyncio.run(run_agent_for_job(
+                job_url=current_job.job_url,
+                resume_path=resume_path,
+                model_name=model_name,
+                company=current_job.company,
+                role=current_job.role,
+                skip_duplicate=True
+            ))
+            
+            if result.get("success"):
+                db.update_status(current_job.id, ApplicationStatus.COMPLETED)
+                add_log(f"✅ Completed: {current_job.company}", "success")
+            else:
+                # Check if it's a CAPTCHA situation
+                error_msg = result.get("message", "").lower()
+                if "captcha" in error_msg:
+                    st.session_state.auto_apply_paused = True
+                    add_log(f"⚠️ CAPTCHA detected at {current_job.company} - please solve manually", "warning")
+                    st.warning("🔐 **CAPTCHA Detected!** Please solve it in the browser, then click **Resume**.")
+                else:
+                    db.update_status(current_job.id, ApplicationStatus.FAILED, notes=result.get("message"))
+                    add_log(f"❌ Failed: {current_job.company} - {result.get('message')}", "error")
+        
+        except Exception as e:
+            db.update_status(current_job.id, ApplicationStatus.FAILED, notes=str(e))
+            add_log(f"❌ Error: {current_job.company} - {str(e)}", "error")
+        
+        # Continue to next job if not paused
+        if not st.session_state.auto_apply_paused:
+            time.sleep(2)  # Brief pause between applications
+            st.rerun()
+    
+    # Activity log
+    st.markdown("---")
+    st.subheader("📜 Activity Log")
+    if st.session_state.agent_logs:
+        log_text = "\n".join(reversed(st.session_state.agent_logs[-30:]))
+        st.code(log_text, language=None)
+    else:
+        st.info("No activity yet. Start auto-apply to see logs.")
+
+
+def render_manual_tab(model_name: str):
+    """Render the manual application tab."""
+    st.header("📝 Manual Application")
+    st.markdown("Apply to a single job by pasting its URL.")
+    
+    db = get_db()
+    resume_path = get_resume_path()
+    
+    # Job URL Input
+    job_url = st.text_input(
+        "Job Posting URL",
+        placeholder="https://boards.greenhouse.io/company/jobs/123456",
+        help="Paste the direct link to the job application page"
+    )
+    
+    # Check for duplicate
+    is_duplicate = False
+    if job_url:
+        existing_app = db.get_application_by_url(job_url)
+        if existing_app:
+            is_duplicate = True
+            st.warning(f"⚠️ Already applied to {existing_app.company} - {existing_app.role} on {existing_app.created_at.strftime('%Y-%m-%d')}")
+    
+    # Optional job details
+    with st.expander("📝 Job Details (Optional)"):
+        col1, col2 = st.columns(2)
+        with col1:
+            company_name = st.text_input("Company", placeholder="e.g., Google")
+        with col2:
+            role_title = st.text_input("Role", placeholder="e.g., Software Engineer")
+    
+    # Resume status
+    if resume_path:
+        st.success(f"✓ Using resume: {Path(resume_path).name}")
+    else:
+        st.error("❌ No resume found!")
+    
+    # Apply button
+    st.markdown("---")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        start_disabled = st.session_state.agent_running or not job_url or not resume_path
+        button_label = "🔄 Re-apply Anyway" if is_duplicate else "🚀 Start Agent"
+        
+        if st.button(button_label, disabled=start_disabled, use_container_width=True):
+            st.session_state.agent_running = True
+            st.session_state.agent_logs = []
+            add_log(f"Starting agent for: {job_url}", "action")
+            
+            result = asyncio.run(run_agent_for_job(
+                job_url=job_url,
+                resume_path=resume_path,
+                model_name=model_name,
+                company=company_name or None,
+                role=role_title or None,
+                skip_duplicate=is_duplicate
+            ))
+            
+            st.session_state.agent_running = False
+            
+            if result.get("success"):
+                st.success("✅ Agent completed! Review the application in the browser.")
+            else:
+                st.error(f"❌ Agent stopped: {result.get('message')}")
+            
+            st.rerun()
+    
+    with col2:
+        if st.button("🔄 Reset", use_container_width=True):
+            st.session_state.agent_logs = []
+            st.rerun()
+    
+    # Activity log
+    st.markdown("---")
+    st.subheader("📜 Activity Log")
+    if st.session_state.agent_logs:
+        log_text = "\n".join(reversed(st.session_state.agent_logs[-30:]))
+        st.code(log_text, language=None)
+
+
+def render_history_tab():
+    """Render the application history tab."""
+    st.header("📚 Application History")
+    
+    db = get_db()
+    
+    # Filter options
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col1:
+        status_filter = st.selectbox(
+            "Status",
+            options=["All", "queued", "in_progress", "completed", "submitted", "failed", "interview", "offer", "rejected", "skipped"]
+        )
+    
+    with col2:
+        search_query = st.text_input("🔍 Search", placeholder="Company or role...")
+    
+    with col3:
+        st.write("")
+        st.write("")
+        if st.button("🔄 Refresh"):
+            st.rerun()
+    
+    # Get applications
+    if search_query:
+        applications = db.search_applications(search_query)
+    elif status_filter != "All":
+        applications = db.get_all_applications(status=ApplicationStatus(status_filter), limit=200)
+    else:
+        applications = db.get_all_applications(limit=200)
+    
+    # Stats row
+    st.markdown("---")
+    stats = db.get_statistics()
+    cols = st.columns(6)
+    status_counts = stats.get("by_status", {})
+    
+    status_display = [
+        ("queued", "⏳"), ("completed", "✅"), ("submitted", "📤"),
+        ("interview", "🎯"), ("offer", "🎉"), ("rejected", "👎")
+    ]
+    
+    for i, (status, emoji) in enumerate(status_display):
+        with cols[i]:
+            count = status_counts.get(status, 0)
+            st.metric(f"{emoji} {status.title()}", count)
+    
+    # Application list
+    st.markdown("---")
+    
+    if applications:
+        for app in applications:
+            status_emoji = {
+                "queued": "⏳", "in_progress": "🔄", "completed": "✅",
+                "submitted": "📤", "failed": "❌", "rejected": "👎",
+                "interview": "🎯", "offer": "🎉", "skipped": "⏭️"
+            }.get(app.status.value, "❓")
+            
+            with st.expander(f"{status_emoji} {app.company} - {app.role}", expanded=False):
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    st.markdown(f"**URL:** [{app.job_url[:50]}...]({app.job_url})")
+                    st.markdown(f"**Location:** {app.location or 'Unknown'}")
+                    st.markdown(f"**Created:** {app.created_at.strftime('%Y-%m-%d %H:%M')}")
+                    if app.applied_at:
+                        st.markdown(f"**Applied:** {app.applied_at.strftime('%Y-%m-%d %H:%M')}")
+                    if app.notes:
+                        st.markdown(f"**Notes:** {app.notes}")
+                
+                with col2:
+                    st.markdown("**Update Status:**")
+                    new_status = st.selectbox(
+                        "Status",
+                        options=["submitted", "interview", "offer", "rejected", "failed"],
+                        key=f"status_{app.id}",
+                        label_visibility="collapsed"
+                    )
+                    if st.button("Update", key=f"update_{app.id}"):
+                        db.update_status(app.id, ApplicationStatus(new_status))
+                        st.rerun()
+                    
+                    if st.button("🗑️ Delete", key=f"delete_{app.id}"):
+                        db.delete_application(app.id)
+                        st.rerun()
+    else:
+        st.info("No applications found. Start applying to build your history!")
+
+
+def main():
+    """Main application entry point."""
+    init_session_state()
+    
+    # Header
+    st.markdown('<p class="main-header">🤖 AI Job Application Agent</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Fully automated job applications • Privacy-first • 100% local</p>', unsafe_allow_html=True)
+    
+    # Sidebar
+    model_name = render_sidebar()
+    
+    # Main tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["🔍 Discover", "🚀 Auto-Apply", "📝 Manual", "📚 History"])
+    
+    with tab1:
+        render_discover_tab()
+    
+    with tab2:
+        render_auto_apply_tab(model_name)
+    
+    with tab3:
+        render_manual_tab(model_name)
+    
+    with tab4:
+        render_history_tab()
     
     # Footer
     st.markdown("---")
     st.markdown("""
     <div style="text-align: center; color: #9CA3AF; font-size: 0.875rem;">
-        🔒 All data stays on your machine • Powered by Ollama + Llama 3.1 • No external APIs
+        🔒 All data stays on your machine • Powered by Ollama • No external APIs
     </div>
     """, unsafe_allow_html=True)
 
