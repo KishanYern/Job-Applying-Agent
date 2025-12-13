@@ -1,9 +1,11 @@
 """
 Local AI Job Application Agent - Core Agent Logic
 Uses browser-use + Playwright for DOM interaction and Ollama for reasoning.
+Includes error recovery, state persistence, and notification support.
 """
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Callable, Optional
 from dataclasses import dataclass
@@ -18,8 +20,39 @@ from application_db import get_db, ApplicationStatus
 # Cover letter generation
 from cover_letter import get_cover_letter_instructions
 
+# State management and error recovery
+from agent_state import (
+    get_state_manager,
+    AgentState,
+    AgentPhase,
+    RetryConfig,
+    calculate_retry_delay,
+    is_retriable_error,
+    is_browser_crash,
+    is_captcha_error,
+)
+
+# Notifications
+from notifications import (
+    notify_captcha,
+    notify_browser_crash,
+    notify_network_error,
+    notify_success,
+    notify_error,
+)
+
 # Type definitions
 LogCallback = Callable[[str, str], None]
+
+# Default retry configuration
+DEFAULT_RETRY_CONFIG = RetryConfig(
+    max_retries=3,
+    initial_delay=2.0,
+    max_delay=30.0,
+    exponential_base=2.0,
+    network_retries=5,
+    browser_restart_retries=2,
+)
 
 
 @dataclass
@@ -30,6 +63,8 @@ class AgentResult:
     application_id: Optional[int] = None
     fields_filled: int = 0
     research_queries: int = 0
+    session_id: Optional[str] = None
+    can_resume: bool = False
 
 
 def load_profile(profile_path: str) -> str:
@@ -100,24 +135,31 @@ async def run_agent(
     log_callback: Optional[LogCallback] = None,
     company: Optional[str] = None,
     role: Optional[str] = None,
-    skip_duplicate_check: bool = False
+    skip_duplicate_check: bool = False,
+    retry_config: Optional[RetryConfig] = None,
+    resume_session_id: Optional[str] = None
 ) -> dict:
     """
-    Run the job application agent.
+    Run the job application agent with error recovery and retry support.
     
     Args:
         job_url: The URL of the job posting/application page.
         resume_path: Path to the resume PDF file.
         profile_path: Path to the my_profile.md file.
-        model_name: The Ollama model to use (default: llama3.1).
+        model_name: The Ollama model to use (default: qwen2.5:7b).
         log_callback: Optional callback function for logging (message, level).
         company: Company name (optional, for tracking).
         role: Role title (optional, for tracking).
         skip_duplicate_check: If True, skip duplicate URL check.
+        retry_config: Configuration for retry behavior.
+        resume_session_id: Session ID to resume from (for crash recovery).
     
     Returns:
-        dict with 'success' (bool), 'message' (str), and 'application_id' (int).
+        dict with 'success' (bool), 'message' (str), 'application_id' (int),
+        'session_id' (str), and 'can_resume' (bool).
     """
+    config = retry_config or DEFAULT_RETRY_CONFIG
+    state_manager = get_state_manager()
     
     def log(message: str, level: str = "info"):
         """Log a message using the callback if provided."""
@@ -127,10 +169,23 @@ async def run_agent(
     
     db = get_db()
     application_id = None
+    state: Optional[AgentState] = None
     
     try:
+        # Check for session to resume
+        if resume_session_id:
+            state = state_manager.load_state(resume_session_id)
+            if state:
+                log(f"🔄 Resuming session: {state.session_id}", "info")
+                application_id = state.application_id
+                job_url = state.job_url
+                company = state.company
+                role = state.role
+            else:
+                log(f"⚠️ Could not load session {resume_session_id}", "warning")
+        
         # Check for duplicate application
-        if not skip_duplicate_check:
+        if not skip_duplicate_check and not resume_session_id:
             existing = db.get_application_by_url(job_url)
             if existing:
                 log(f"⚠️ Already applied to this job on {existing.created_at.strftime('%Y-%m-%d')}", "warning")
@@ -138,20 +193,35 @@ async def run_agent(
                     "success": False,
                     "message": f"Duplicate application: Already applied to {existing.company} - {existing.role}",
                     "application_id": existing.id,
-                    "is_duplicate": True
+                    "is_duplicate": True,
+                    "can_resume": False
                 }
         
-        # Record application in database
-        application_id = db.add_application(
-            company=company or "Unknown Company",
-            role=role or "Unknown Role",
-            job_url=job_url,
-            status=ApplicationStatus.IN_PROGRESS,
-            resume_used=resume_path
-        )
+        # Record application in database (if not resuming)
+        if not application_id:
+            application_id = db.add_application(
+                company=company or "Unknown Company",
+                role=role or "Unknown Role",
+                job_url=job_url,
+                status=ApplicationStatus.IN_PROGRESS,
+                resume_used=resume_path
+            )
         
         if application_id:
             log(f"📝 Application #{application_id} recorded in database", "info")
+        
+        # Create or update state
+        if not state:
+            state = state_manager.create_session(
+                job_url=job_url,
+                company=company or "Unknown",
+                role=role or "Unknown",
+                application_id=application_id,
+                model_name=model_name,
+                resume_path=resume_path,
+                profile_path=profile_path
+            )
+            log(f"📋 Created session: {state.session_id}", "info")
         
         # Load profile
         log("Loading candidate profile...", "info")
@@ -165,19 +235,40 @@ async def run_agent(
             role=role or "the position"
         )
         
-        # Initialize the LLM
+        # Initialize the LLM with retry
         log(f"Initializing Ollama with model: {model_name}", "info")
-        llm = ChatOllama(
-            model=model_name,
-            temperature=0.1,  # Low temperature for consistent form filling
-            num_ctx=8192,     # Context window for the profile + page content
-        )
-        log("LLM initialized successfully", "success")
+        llm = None
+        llm_retry_count = 0
         
-        # Initialize the browser agent
+        while llm_retry_count < config.network_retries:
+            try:
+                llm = ChatOllama(
+                    model=model_name,
+                    temperature=0.1,
+                    num_ctx=8192,
+                )
+                # Test connection
+                log("LLM initialized successfully", "success")
+                break
+            except Exception as e:
+                llm_retry_count += 1
+                if llm_retry_count >= config.network_retries:
+                    raise ConnectionError(f"Failed to connect to Ollama after {config.network_retries} attempts")
+                
+                delay = calculate_retry_delay(llm_retry_count - 1, config)
+                log(f"⚠️ Ollama connection failed, retry {llm_retry_count}/{config.network_retries} in {delay:.1f}s...", "warning")
+                notify_network_error(llm_retry_count, config.network_retries)
+                state.record_error(str(e), "ollama_connection")
+                state_manager.save_state(state)
+                await asyncio.sleep(delay)
+        
+        # Update state
+        state.update_phase(AgentPhase.NAVIGATING, "LLM ready, preparing browser")
+        state_manager.save_state(state)
+        
+        # Initialize the browser agent with retry loop
         log("Launching browser...", "action")
         
-        # Get company name for cover letter context
         company_name = company or "the company"
         role_name = role or "the position"
         
@@ -233,81 +324,314 @@ CRITICAL RULES:
 - **COVER LETTERS:** Use contractions, never say "I am excited" or "leverage". Keep under 300 words.
 """
         
-        # Initialize and run the browser-use agent
-        # Note: Type ignore needed due to langchain type stub version mismatch
-        agent = Agent(
-            task=task,
-            llm=llm,  # type: ignore[arg-type]
-            extend_system_message=system_prompt,  # Inject candidate profile + instructions
-            browser_context_kwargs={
-                "headless": False,  # Show the browser so user can watch/intervene
-            }
-        )
+        # Run agent with retry loop for browser crashes
+        browser_retry_count = 0
+        result = None
         
-        log(f"Navigating to: {job_url}", "action")
-        
-        # Run the agent
-        result = await agent.run()
+        while browser_retry_count <= config.browser_restart_retries:
+            try:
+                # Initialize and run the browser-use agent
+                agent = Agent(
+                    task=task,
+                    llm=llm,  # type: ignore[arg-type]
+                    extend_system_message=system_prompt,
+                    browser_context_kwargs={
+                        "headless": False,
+                    }
+                )
+                
+                log(f"Navigating to: {job_url}", "action")
+                state.update_phase(AgentPhase.FILLING_FORM, f"Navigating to {job_url}")
+                state_manager.save_state(state)
+                
+                # Run the agent
+                result = await agent.run()
+                
+                # Check result for CAPTCHA
+                result_str = str(result).lower() if result else ""
+                if "captcha" in result_str:
+                    log("🔐 CAPTCHA detected - please solve manually", "warning")
+                    state.update_phase(AgentPhase.PAUSED_CAPTCHA, "CAPTCHA detected")
+                    state_manager.save_state(state)
+                    notify_captcha(company_name, job_url)
+                    return {
+                        "success": False,
+                        "message": "CAPTCHA detected. Please solve it manually and retry.",
+                        "application_id": application_id,
+                        "session_id": state.session_id,
+                        "can_resume": True
+                    }
+                
+                # Success!
+                break
+                
+            except Exception as e:
+                error_msg = str(e)
+                state.record_error(error_msg, type(e).__name__)
+                
+                # Check for CAPTCHA in error
+                if is_captcha_error(e):
+                    log("🔐 CAPTCHA detected - please solve manually", "warning")
+                    state.update_phase(AgentPhase.PAUSED_CAPTCHA, "CAPTCHA detected")
+                    state_manager.save_state(state)
+                    notify_captcha(company_name, job_url)
+                    return {
+                        "success": False,
+                        "message": "CAPTCHA detected. Please solve it manually and retry.",
+                        "application_id": application_id,
+                        "session_id": state.session_id,
+                        "can_resume": True
+                    }
+                
+                # Check if browser crashed and can retry
+                if is_browser_crash(e) and browser_retry_count < config.browser_restart_retries:
+                    browser_retry_count += 1
+                    state.increment_retry()
+                    delay = calculate_retry_delay(browser_retry_count - 1, config)
+                    
+                    log(f"⚠️ Browser crashed, restarting ({browser_retry_count}/{config.browser_restart_retries}) in {delay:.1f}s...", "warning")
+                    notify_browser_crash(error_msg[:100])
+                    state_manager.save_state(state)
+                    
+                    await asyncio.sleep(delay)
+                    continue
+                
+                # Check if network error and can retry
+                elif is_retriable_error(e) and state.retry_count < config.max_retries:
+                    state.increment_retry()
+                    delay = calculate_retry_delay(state.retry_count - 1, config)
+                    
+                    log(f"⚠️ Network error, retry {state.retry_count}/{config.max_retries} in {delay:.1f}s...", "warning")
+                    notify_network_error(state.retry_count, config.max_retries)
+                    state_manager.save_state(state)
+                    
+                    await asyncio.sleep(delay)
+                    continue
+                
+                # Non-retriable error or max retries exceeded
+                raise
         
         log("Agent completed its run", "success")
         
-        # Update database status to completed
+        # Update database and state to completed
         if application_id:
             db.update_status(application_id, ApplicationStatus.COMPLETED)
             log(f"✅ Application #{application_id} marked as completed", "success")
+        
+        state_manager.mark_completed(state)
+        notify_success(company_name, role_name)
         
         return {
             "success": True,
             "message": "Agent completed. Please review the application before submitting.",
             "application_id": application_id,
-            "result": result
+            "session_id": state.session_id,
+            "result": result,
+            "can_resume": False
         }
         
     except FileNotFoundError as e:
         log(f"Profile file error: {e}", "error")
         if application_id:
             db.update_status(application_id, ApplicationStatus.FAILED, notes=str(e))
-        return {"success": False, "message": str(e), "application_id": application_id}
+        if state:
+            state_manager.mark_failed(state, str(e))
+        notify_error(company or "Unknown", str(e))
+        return {
+            "success": False, 
+            "message": str(e), 
+            "application_id": application_id,
+            "session_id": state.session_id if state else None,
+            "can_resume": False
+        }
     
-    except ConnectionError:
+    except ConnectionError as e:
         log("Could not connect to Ollama. Is it running?", "error")
         if application_id:
             db.update_status(application_id, ApplicationStatus.FAILED, notes="Ollama connection failed")
+        if state:
+            state_manager.mark_failed(state, "Ollama connection failed")
+        notify_error(company or "Unknown", "Ollama connection failed")
         return {
             "success": False, 
             "message": "Ollama connection failed. Please ensure Ollama is running (ollama serve).",
-            "application_id": application_id
+            "application_id": application_id,
+            "session_id": state.session_id if state else None,
+            "can_resume": True  # Can retry after starting Ollama
         }
     
     except Exception as e:
-        log(f"Unexpected error: {type(e).__name__}: {e}", "error")
+        error_msg = f"{type(e).__name__}: {e}"
+        log(f"Unexpected error: {error_msg}", "error")
+        
         if application_id:
-            db.update_status(application_id, ApplicationStatus.FAILED, notes=f"{type(e).__name__}: {e}")
-        return {"success": False, "message": f"Agent error: {str(e)}", "application_id": application_id}
+            db.update_status(application_id, ApplicationStatus.FAILED, notes=error_msg)
+        
+        # Determine if session can be resumed
+        can_resume = False
+        if state:
+            if is_retriable_error(e) or is_browser_crash(e):
+                can_resume = True
+                state.update_phase(AgentPhase.PAUSED_USER, f"Error: {error_msg}")
+            else:
+                state_manager.mark_failed(state, error_msg)
+            state_manager.save_state(state)
+        
+        notify_error(company or "Unknown", str(e)[:100])
+        
+        return {
+            "success": False, 
+            "message": f"Agent error: {str(e)}", 
+            "application_id": application_id,
+            "session_id": state.session_id if state else None,
+            "can_resume": can_resume
+        }
+
+
+async def resume_agent(session_id: str, log_callback: Optional[LogCallback] = None) -> dict:
+    """
+    Resume an interrupted agent session.
+    
+    Args:
+        session_id: The session ID to resume
+        log_callback: Optional logging callback
+    
+    Returns:
+        Result dict from run_agent
+    """
+    state_manager = get_state_manager()
+    state = state_manager.load_state(session_id)
+    
+    if not state:
+        return {
+            "success": False,
+            "message": f"Session {session_id} not found",
+            "can_resume": False
+        }
+    
+    return await run_agent(
+        job_url=state.job_url,
+        resume_path=state.resume_path,
+        profile_path=state.profile_path,
+        model_name=state.model_name,
+        log_callback=log_callback,
+        company=state.company,
+        role=state.role,
+        skip_duplicate_check=True,
+        resume_session_id=session_id
+    )
+
+
+def get_recoverable_sessions() -> list:
+    """
+    Get list of sessions that can be recovered.
+    
+    Returns:
+        List of AgentState objects for recoverable sessions
+    """
+    state_manager = get_state_manager()
+    return state_manager.get_recoverable_sessions()
+
+
+def check_active_session() -> Optional[AgentState]:
+    """
+    Check if there's an active session that was interrupted.
+    
+    Returns:
+        AgentState if found, None otherwise
+    """
+    state_manager = get_state_manager()
+    return state_manager.get_active_session()
 
 
 # For testing the agent directly
 if __name__ == "__main__":
     import sys
     
-    if len(sys.argv) < 3:
-        print("Usage: python apply_agent.py <job_url> <resume_path>")
-        print("Example: python apply_agent.py https://boards.greenhouse.io/company/jobs/123 /path/to/resume.pdf")
+    def print_usage():
+        print("\nUsage:")
+        print("  python apply_agent.py <job_url> <resume_path>  - Run agent for a job")
+        print("  python apply_agent.py resume <session_id>      - Resume a session")
+        print("  python apply_agent.py sessions                 - List recoverable sessions")
+        print("  python apply_agent.py check                    - Check for active session")
+        print("\nExample:")
+        print("  python apply_agent.py https://boards.greenhouse.io/company/jobs/123 /path/to/resume.pdf")
+    
+    if len(sys.argv) < 2:
+        print_usage()
         sys.exit(1)
     
-    job_url = sys.argv[1]
-    resume_path = sys.argv[2]
-    profile_path = Path(__file__).parent / "my_profile.md"
+    command = sys.argv[1]
     
-    print(f"Starting agent for: {job_url}")
-    print(f"Using profile: {profile_path}")
-    print(f"Using resume: {resume_path}")
+    if command == "sessions":
+        # List recoverable sessions
+        sessions = get_recoverable_sessions()
+        if sessions:
+            print(f"\n📋 Recoverable Sessions ({len(sessions)}):\n")
+            for s in sessions:
+                print(f"  Session: {s.session_id}")
+                print(f"    Job: {s.role} at {s.company}")
+                print(f"    URL: {s.job_url[:60]}...")
+                print(f"    Phase: {s.phase.value}")
+                print(f"    Retries: {s.retry_count}")
+                print(f"    Updated: {s.updated_at}")
+                print()
+        else:
+            print("No recoverable sessions found.")
     
-    result = asyncio.run(run_agent(
-        job_url=job_url,
-        resume_path=resume_path,
-        profile_path=str(profile_path),
-        model_name="qwen2.5:7b"
-    ))
+    elif command == "check":
+        # Check for active session
+        state = check_active_session()
+        if state:
+            print(f"\n🔄 Active Session Found:")
+            print(f"  Session: {state.session_id}")
+            print(f"  Job: {state.role} at {state.company}")
+            print(f"  URL: {state.job_url}")
+            print(f"  Phase: {state.phase.value}")
+            print(f"\nTo resume: python apply_agent.py resume {state.session_id}")
+        else:
+            print("No active session found.")
     
-    print(f"\nResult: {result}")
+    elif command == "resume":
+        if len(sys.argv) < 3:
+            print("Error: Session ID required")
+            print("Usage: python apply_agent.py resume <session_id>")
+            sys.exit(1)
+        
+        session_id = sys.argv[2]
+        print(f"Resuming session: {session_id}")
+        
+        result = asyncio.run(resume_agent(session_id))
+        print(f"\nResult: {result}")
+    
+    elif command.startswith("http"):
+        # Run agent for a job URL
+        if len(sys.argv) < 3:
+            print("Error: Resume path required")
+            print_usage()
+            sys.exit(1)
+        
+        job_url = sys.argv[1]
+        resume_path = sys.argv[2]
+        profile_path = Path(__file__).parent / "my_profile.md"
+        
+        print(f"Starting agent for: {job_url}")
+        print(f"Using profile: {profile_path}")
+        print(f"Using resume: {resume_path}")
+        
+        result = asyncio.run(run_agent(
+            job_url=job_url,
+            resume_path=resume_path,
+            profile_path=str(profile_path),
+            model_name="qwen2.5:7b"
+        ))
+        
+        print(f"\nResult: {result}")
+        
+        if result.get("can_resume") and result.get("session_id"):
+            print(f"\n💡 To resume: python apply_agent.py resume {result['session_id']}")
+    
+    else:
+        print(f"Unknown command: {command}")
+        print_usage()
+        sys.exit(1)

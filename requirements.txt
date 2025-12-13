@@ -21,6 +21,9 @@ pypdf>=3.17.0
 # Audio alerts for human handoff
 playsound==1.2.2
 
+# Desktop notifications (cross-platform)
+plyer>=2.1.0
+
 # HTTP Client (for job scraping)
 httpx>=0.25.0
 

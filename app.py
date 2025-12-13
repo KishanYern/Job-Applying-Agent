@@ -17,6 +17,18 @@ nest_asyncio.apply()
 from application_db import get_db, ApplicationStatus
 from job_scraper import get_job_urls_sync, JobListing
 
+# Notifications and state management
+from notifications import (
+    start_daily_summary_scheduler,
+    stop_daily_summary_scheduler,
+    get_scheduler,
+    notify_captcha,
+    send_daily_summary,
+    NotificationConfig,
+    configure_notifications,
+)
+from agent_state import get_state_manager, AgentPhase
+
 # Page configuration
 st.set_page_config(
     page_title="AI Job Application Agent",
@@ -87,6 +99,36 @@ def init_session_state():
         st.session_state.current_job_index = 0
     if "auto_apply_paused" not in st.session_state:
         st.session_state.auto_apply_paused = False
+    # Notification settings
+    if "notifications_enabled" not in st.session_state:
+        st.session_state.notifications_enabled = True
+    if "sound_enabled" not in st.session_state:
+        st.session_state.sound_enabled = True
+    if "daily_summary_time" not in st.session_state:
+        st.session_state.daily_summary_time = "18:00"
+    if "daily_scheduler_started" not in st.session_state:
+        st.session_state.daily_scheduler_started = False
+    # Session recovery
+    if "pending_resume_session" not in st.session_state:
+        st.session_state.pending_resume_session = None
+
+
+def start_notification_scheduler():
+    """Start the daily summary scheduler if enabled."""
+    if st.session_state.notifications_enabled and not st.session_state.daily_scheduler_started:
+        db = get_db()
+        start_daily_summary_scheduler(db, st.session_state.daily_summary_time)
+        st.session_state.daily_scheduler_started = True
+
+
+def update_notification_config():
+    """Update notification configuration from session state."""
+    config = NotificationConfig(
+        enable_desktop=st.session_state.notifications_enabled,
+        enable_sound=st.session_state.sound_enabled,
+        daily_summary_time=st.session_state.daily_summary_time,
+    )
+    configure_notifications(config)
 
 
 def load_profile() -> str:
@@ -118,25 +160,33 @@ async def run_agent_for_job(
     model_name: str,
     company: str = None,
     role: str = None,
-    skip_duplicate: bool = False
+    skip_duplicate: bool = False,
+    resume_session_id: str = None
 ) -> dict:
     """Run the job application agent for a single job."""
     try:
-        from apply_agent import run_agent
+        from apply_agent import run_agent, resume_agent
         
-        result = await run_agent(
-            job_url=job_url,
-            resume_path=resume_path,
-            profile_path=str(Path(__file__).parent / "my_profile.md"),
-            model_name=model_name,
-            log_callback=add_log,
-            company=company,
-            role=role,
-            skip_duplicate_check=skip_duplicate
-        )
+        # If resuming a session, use the resume function
+        if resume_session_id:
+            result = await resume_agent(
+                session_id=resume_session_id,
+                log_callback=add_log
+            )
+        else:
+            result = await run_agent(
+                job_url=job_url,
+                resume_path=resume_path,
+                profile_path=str(Path(__file__).parent / "my_profile.md"),
+                model_name=model_name,
+                log_callback=add_log,
+                company=company,
+                role=role,
+                skip_duplicate_check=skip_duplicate
+            )
         return result
     except Exception as e:
-        return {"success": False, "message": str(e)}
+        return {"success": False, "message": str(e), "can_resume": False}
 
 
 def render_sidebar(model_name_key: str = "model_select"):
@@ -154,6 +204,94 @@ def render_sidebar(model_name_key: str = "model_select"):
         )
         
         st.divider()
+        
+        # Notification Settings
+        st.header("🔔 Notifications")
+        
+        notifications_enabled = st.checkbox(
+            "Desktop Notifications",
+            value=st.session_state.notifications_enabled,
+            help="Show desktop alerts for CAPTCHAs and errors"
+        )
+        if notifications_enabled != st.session_state.notifications_enabled:
+            st.session_state.notifications_enabled = notifications_enabled
+            update_notification_config()
+        
+        sound_enabled = st.checkbox(
+            "Sound Alerts",
+            value=st.session_state.sound_enabled,
+            help="Play sounds for important events"
+        )
+        if sound_enabled != st.session_state.sound_enabled:
+            st.session_state.sound_enabled = sound_enabled
+            update_notification_config()
+        
+        daily_time = st.text_input(
+            "Daily Summary Time (HH:MM)",
+            value=st.session_state.daily_summary_time,
+            help="Time to send daily application summary",
+            max_chars=5
+        )
+        if daily_time != st.session_state.daily_summary_time:
+            # Validate time format
+            try:
+                h, m = map(int, daily_time.split(":"))
+                if 0 <= h <= 23 and 0 <= m <= 59:
+                    st.session_state.daily_summary_time = daily_time
+                    update_notification_config()
+                    # Restart scheduler with new time
+                    if st.session_state.daily_scheduler_started:
+                        stop_daily_summary_scheduler()
+                        st.session_state.daily_scheduler_started = False
+                        start_notification_scheduler()
+            except ValueError:
+                pass
+        
+        col_notif1, col_notif2 = st.columns(2)
+        with col_notif1:
+            if st.button("📊 Summary Now", help="Send daily summary now"):
+                db = get_db()
+                send_daily_summary(db)
+                st.success("Summary sent!")
+        with col_notif2:
+            if st.button("🔔 Test Alert", help="Test notification"):
+                from notifications import notify, NotificationType
+                notify("Test Alert", "Notifications are working!", NotificationType.INFO)
+                st.success("Alert sent!")
+        
+        st.divider()
+        
+        # Session Recovery
+        state_manager = get_state_manager()
+        recoverable = state_manager.get_recoverable_sessions(max_age_hours=24)
+        active_session = state_manager.get_active_session()
+        
+        if active_session or recoverable:
+            st.header("🔄 Recovery")
+            
+            if active_session:
+                st.warning(f"⚠️ Interrupted session found!")
+                st.markdown(f"**{active_session.role}** at **{active_session.company}**")
+                st.caption(f"Phase: {active_session.phase.value}")
+                
+                if st.button("🔄 Resume Session", use_container_width=True):
+                    st.session_state.pending_resume_session = active_session.session_id
+                    st.rerun()
+                
+                if st.button("🗑️ Dismiss", use_container_width=True):
+                    state_manager.mark_failed(active_session, "Dismissed by user")
+                    st.rerun()
+            
+            elif recoverable:
+                with st.expander(f"📋 {len(recoverable)} recoverable session(s)"):
+                    for sess in recoverable[:5]:
+                        st.markdown(f"**{sess.company}** - {sess.role}")
+                        st.caption(f"{sess.phase.value} | {sess.updated_at[:16]}")
+                        if st.button("Resume", key=f"resume_{sess.session_id}"):
+                            st.session_state.pending_resume_session = sess.session_id
+                            st.rerun()
+            
+            st.divider()
         
         # Profile Preview
         st.header("👤 Your Profile")
@@ -454,14 +592,28 @@ def render_auto_apply_tab(model_name: str):
         
         # Run the agent
         try:
-            result = asyncio.run(run_agent_for_job(
-                job_url=current_job.job_url,
-                resume_path=resume_path,
-                model_name=model_name,
-                company=current_job.company,
-                role=current_job.role,
-                skip_duplicate=True
-            ))
+            # Check if we're resuming a session
+            resume_session = st.session_state.get("pending_resume_session")
+            if resume_session:
+                st.session_state.pending_resume_session = None
+                result = asyncio.run(run_agent_for_job(
+                    job_url=current_job.job_url,
+                    resume_path=resume_path,
+                    model_name=model_name,
+                    company=current_job.company,
+                    role=current_job.role,
+                    skip_duplicate=True,
+                    resume_session_id=resume_session
+                ))
+            else:
+                result = asyncio.run(run_agent_for_job(
+                    job_url=current_job.job_url,
+                    resume_path=resume_path,
+                    model_name=model_name,
+                    company=current_job.company,
+                    role=current_job.role,
+                    skip_duplicate=True
+                ))
             
             if result.get("success"):
                 db.update_status(current_job.id, ApplicationStatus.COMPLETED)
@@ -471,8 +623,20 @@ def render_auto_apply_tab(model_name: str):
                 error_msg = result.get("message", "").lower()
                 if "captcha" in error_msg:
                     st.session_state.auto_apply_paused = True
+                    # Store session ID for resume
+                    if result.get("session_id"):
+                        st.session_state.pending_resume_session = result.get("session_id")
                     add_log(f"⚠️ CAPTCHA detected at {current_job.company} - please solve manually", "warning")
+                    # Desktop/sound notification is already sent by apply_agent
                     st.warning("🔐 **CAPTCHA Detected!** Please solve it in the browser, then click **Resume**.")
+                elif result.get("can_resume"):
+                    # Error but can resume - pause auto-apply to allow user to decide
+                    st.session_state.auto_apply_paused = True
+                    if result.get("session_id"):
+                        st.session_state.pending_resume_session = result.get("session_id")
+                    db.update_status(current_job.id, ApplicationStatus.IN_PROGRESS, notes=result.get("message"))
+                    add_log(f"⚠️ Error at {current_job.company} - session saved for resume", "warning")
+                    st.warning(f"⚠️ **Recoverable Error!** {result.get('message', 'Unknown error')}\n\nClick **Resume** to retry or **Stop** to skip this job.")
                 else:
                     db.update_status(current_job.id, ApplicationStatus.FAILED, notes=result.get("message"))
                     add_log(f"❌ Failed: {current_job.company} - {result.get('message')}", "error")
@@ -536,7 +700,7 @@ def render_manual_tab(model_name: str):
     # Apply button
     st.markdown("---")
     
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         start_disabled = st.session_state.agent_running or not job_url or not resume_path
         button_label = "🔄 Re-apply Anyway" if is_duplicate else "🚀 Start Agent"
@@ -559,14 +723,46 @@ def render_manual_tab(model_name: str):
             
             if result.get("success"):
                 st.success("✅ Agent completed! Review the application in the browser.")
+            elif result.get("can_resume") and result.get("session_id"):
+                st.session_state.pending_resume_session = result.get("session_id")
+                st.warning(f"⚠️ Agent stopped: {result.get('message')}\n\nSession saved - click **Resume Session** to continue.")
             else:
                 st.error(f"❌ Agent stopped: {result.get('message')}")
             
             st.rerun()
     
     with col2:
+        # Resume button if there's a pending session
+        resume_disabled = not st.session_state.pending_resume_session or st.session_state.agent_running
+        if st.button("🔄 Resume Session", disabled=resume_disabled, use_container_width=True):
+            st.session_state.agent_running = True
+            add_log(f"Resuming session...", "action")
+            
+            result = asyncio.run(run_agent_for_job(
+                job_url=job_url or "",
+                resume_path=resume_path,
+                model_name=model_name,
+                resume_session_id=st.session_state.pending_resume_session
+            ))
+            
+            st.session_state.agent_running = False
+            
+            if result.get("success"):
+                st.session_state.pending_resume_session = None
+                st.success("✅ Agent completed! Review the application in the browser.")
+            elif result.get("can_resume") and result.get("session_id"):
+                st.session_state.pending_resume_session = result.get("session_id")
+                st.warning(f"⚠️ Agent stopped: {result.get('message')}")
+            else:
+                st.session_state.pending_resume_session = None
+                st.error(f"❌ Agent stopped: {result.get('message')}")
+            
+            st.rerun()
+    
+    with col3:
         if st.button("🔄 Reset", use_container_width=True):
             st.session_state.agent_logs = []
+            st.session_state.pending_resume_session = None
             st.rerun()
     
     # Activity log
@@ -671,9 +867,23 @@ def main():
     """Main application entry point."""
     init_session_state()
     
+    # Initialize notification config
+    update_notification_config()
+    
+    # Start daily summary scheduler
+    start_notification_scheduler()
+    
     # Header
     st.markdown('<p class="main-header">🤖 AI Job Application Agent</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Fully automated job applications • Privacy-first • 100% local</p>', unsafe_allow_html=True)
+    
+    # Check for pending session resume at startup
+    if st.session_state.pending_resume_session:
+        session_id = st.session_state.pending_resume_session
+        state_manager = get_state_manager()
+        state = state_manager.load_state(session_id)
+        if state:
+            st.info(f"🔄 Ready to resume: **{state.role}** at **{state.company}**")
     
     # Sidebar
     model_name = render_sidebar()
