@@ -15,6 +15,9 @@ from langchain_ollama import ChatOllama
 # Local database for tracking applications
 from application_db import get_db, ApplicationStatus
 
+# Cover letter generation
+from cover_letter import get_cover_letter_instructions
+
 # Type definitions
 LogCallback = Callable[[str, str], None]
 
@@ -37,8 +40,12 @@ def load_profile(profile_path: str) -> str:
     raise FileNotFoundError(f"Profile not found at: {profile_path}")
 
 
-def build_system_prompt(profile_content: str) -> str:
+def build_system_prompt(profile_content: str, company: str = "the company", role: str = "the position") -> str:
     """Build the system prompt for the agent with the user's profile data."""
+    
+    # Get cover letter generation instructions
+    cover_letter_instructions = get_cover_letter_instructions(profile_content, company, role)
+    
     return f"""You are an autonomous job application agent. Your task is to fill out job application forms accurately and professionally using the candidate's profile data.
 
 ## CANDIDATE PROFILE (Use this data to fill forms)
@@ -66,6 +73,8 @@ If asked about salary expectations:
 1. Open a new tab and search for average salary for the role + location.
 2. Use a reasonable market rate based on the research.
 3. If unsure, use a range format (e.g., "$80,000 - $100,000").
+
+{cover_letter_instructions}
 
 ### Critical Safety Rules:
 1. **NEVER submit** the application without explicit user confirmation.
@@ -149,8 +158,12 @@ async def run_agent(
         profile_content = load_profile(profile_path)
         log(f"Profile loaded ({len(profile_content)} characters)", "success")
         
-        # Build system prompt
-        system_prompt = build_system_prompt(profile_content)
+        # Build system prompt with company/role for personalized cover letters
+        system_prompt = build_system_prompt(
+            profile_content, 
+            company=company or "the company", 
+            role=role or "the position"
+        )
         
         # Initialize the LLM
         log(f"Initializing Ollama with model: {model_name}", "info")
@@ -164,12 +177,18 @@ async def run_agent(
         # Initialize the browser agent
         log("Launching browser...", "action")
         
+        # Get company name for cover letter context
+        company_name = company or "the company"
+        role_name = role or "the position"
+        
         # Create the task for the agent
         task = f"""
 NAVIGATE TO: {job_url}
 
 YOUR GOAL: 
 Complete the job application form up to the review stage. DO NOT SUBMIT.
+
+APPLYING FOR: {role_name} at {company_name}
 
 CANDIDATE PROFILE (Source of Truth):
 {profile_content}
@@ -180,13 +199,38 @@ EXECUTION STEPS:
 3. **Form Filling:** - Map profile data to fields (e.g., "Experience" -> "Reynolds and Reynolds").
    - If a field asks for "Desired Salary" and it's not in the profile, OPEN A NEW TAB, search "average salary for [Role] at [Company]", extract the number, close tab, and fill it.
    - If a field asks "Why do you want to work here?", OPEN A NEW TAB, read the company's "About Us", and synthesize a short answer connecting their values to my "Thematic Interests" (in profile).
-4. **Review:** Click "Next" until you reach the "Review" or "Final Submit" page.
-5. **HALT:** Stop immediately upon reaching the final page. notify the user: "Application ready for review."
+
+4. **COVER LETTER HANDLING:**
+   If the application asks for a cover letter:
+   
+   a) **For TEXT FIELDS**: Write a short cover letter (3 paragraphs, under 300 words):
+      
+      BANNED phrases - never use: "I am writing to express", "I am excited", "leverage", "utilize", "passionate about"
+      
+      REQUIRED: Use contractions ("I'm" not "I am", "I've" not "I have")
+      
+      FORMAT:
+      Dear {company_name} Team,
+      
+      [Why this {role_name} role caught your attention - 2 sentences]
+      
+      [2 specific things from your experience that fit - 3 sentences]  
+      
+      [You'd like to chat more - 1 sentence]
+      
+      Best,
+      [Name from profile]
+   
+   b) **For FILE UPLOAD only**: Alert user that a cover letter file is needed.
+
+5. **Review:** Click "Next" until you reach the "Review" or "Final Submit" page.
+6. **HALT:** Stop immediately upon reaching the final page. notify the user: "Application ready for review."
 
 CRITICAL RULES:
 - **NO SUBMITTING:** Never click "Submit Application".
 - **CAPTCHAS:** If you see a CAPTCHA, stop and alert the user.
 - **PRIVACY:** Do not hallucinate personal data. Use *only* what is in the profile.
+- **COVER LETTERS:** Use contractions, never say "I am excited" or "leverage". Keep under 300 words.
 """
         
         # Initialize and run the browser-use agent
