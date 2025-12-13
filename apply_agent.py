@@ -83,7 +83,7 @@ async def run_agent(
     job_url: str,
     resume_path: str,
     profile_path: str,
-    model_name: str = "llama3.1",
+    model_name: str = "qwen2.5:7b",
     log_callback: Optional[LogCallback] = None
 ) -> dict:
     """
@@ -213,7 +213,7 @@ if __name__ == "__main__":
         job_url=job_url,
         resume_path=resume_path,
         profile_path=str(profile_path),
-        model_name="llama3.1"
+        model_name="qwen2.5:7b"
     ))
     
     print(f"\nResult: {result}")

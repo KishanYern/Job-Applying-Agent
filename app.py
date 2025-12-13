@@ -154,7 +154,7 @@ def main():
         # Model Selection
         model_name = st.selectbox(
             "Select LLM Model",
-            options=["llama3.1", "llama3.1:8b", "llama3.2", "llama3.2:3b"],
+            options=["qwen2.5:7b", "llama3.1", "llama3.1:8b", "llama3.2", "llama3.2:3b"],
             index=0,
             help="Choose the Ollama model for the agent's reasoning"
         )

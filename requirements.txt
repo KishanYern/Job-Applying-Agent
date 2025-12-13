@@ -19,7 +19,7 @@ nest-asyncio>=1.5.8
 pypdf>=3.17.0
 
 # Audio alerts for human handoff
-playsound>=1.3.0
+playsound==1.2.2
 
 # HTTP Client (for job scraping)
 httpx>=0.25.0
