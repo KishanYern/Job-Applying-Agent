@@ -1,16 +1,26 @@
-# Local AI Job Application Agent - Dependencies
+# AI Job Application Agent V2 - Dependencies
 
 # UI
 streamlit>=1.28.0
 
 # Browser Automation
-browser-use>=0.1.0
+browser-use>=0.2.0
 playwright>=1.40.0
 
 # LLM Integration
 langchain>=0.1.0
-langchain-ollama>=0.1.0
+langchain-groq>=0.1.0
+langchain-openai>=0.1.0
 langchain-community>=0.0.10
+
+# Phase 1: Serverless inference (Llama-3.3-70B via Groq)
+groq>=0.8.0
+
+# Phase 1: Web search for company research
+tavily-python>=0.3.0
+
+# Phase 2: OpenAI-compatible client for RunPod/Vast.ai vLLM endpoint
+openai>=1.0.0
 
 # Async Support (nest_asyncio allows nested event loops in Streamlit)
 nest-asyncio>=1.5.8

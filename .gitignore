@@ -47,3 +47,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# V2 design documents (internal planning, not shipped)
+V2.md
+V2_Checklist.md

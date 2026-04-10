@@ -3,6 +3,7 @@ Local AI Job Application Agent - Streamlit UI
 A privacy-focused, automated job application tool running entirely on local hardware.
 """
 
+import os
 import streamlit as st
 import asyncio
 import time
@@ -111,6 +112,15 @@ def init_session_state():
     # Session recovery
     if "pending_resume_session" not in st.session_state:
         st.session_state.pending_resume_session = None
+    # V2 API keys (loaded from env if present)
+    if "groq_api_key" not in st.session_state:
+        st.session_state.groq_api_key = os.environ.get("GROQ_API_KEY", "")
+    if "tavily_api_key" not in st.session_state:
+        st.session_state.tavily_api_key = os.environ.get("TAVILY_API_KEY", "")
+    if "runpod_endpoint_url" not in st.session_state:
+        st.session_state.runpod_endpoint_url = os.environ.get("RUNPOD_ENDPOINT_URL", "")
+    if "runpod_api_key" not in st.session_state:
+        st.session_state.runpod_api_key = os.environ.get("RUNPOD_API_KEY", "")
 
 
 def start_notification_scheduler():
@@ -154,55 +164,142 @@ def add_log(message: str, level: str = "info"):
     st.session_state.agent_logs.append(f"[{timestamp}] {icon} {message}")
 
 
+def _sync_api_keys_to_env():
+    """Push API keys from session state into environment variables for sub-modules."""
+    if st.session_state.get("groq_api_key"):
+        os.environ["GROQ_API_KEY"] = st.session_state.groq_api_key
+    if st.session_state.get("tavily_api_key"):
+        os.environ["TAVILY_API_KEY"] = st.session_state.tavily_api_key
+    if st.session_state.get("runpod_endpoint_url"):
+        os.environ["RUNPOD_ENDPOINT_URL"] = st.session_state.runpod_endpoint_url
+    if st.session_state.get("runpod_api_key"):
+        os.environ["RUNPOD_API_KEY"] = st.session_state.runpod_api_key
+
+
 async def run_agent_for_job(
     job_url: str,
     resume_path: str,
-    model_name: str,
     company: str = None,
     role: str = None,
+    job_id: int = None,
     skip_duplicate: bool = False,
-    resume_session_id: str = None
+    resume_session_id: str = None,
 ) -> dict:
-    """Run the job application agent for a single job."""
+    """Run the Phase 2 job application agent for a single job."""
     try:
+        _sync_api_keys_to_env()
         from apply_agent import run_agent, resume_agent
-        
-        # If resuming a session, use the resume function
+
         if resume_session_id:
             result = await resume_agent(
                 session_id=resume_session_id,
-                log_callback=add_log
+                log_callback=add_log,
             )
         else:
             result = await run_agent(
                 job_url=job_url,
                 resume_path=resume_path,
                 profile_path=str(Path(__file__).parent / "my_profile.md"),
-                model_name=model_name,
                 log_callback=add_log,
                 company=company,
                 role=role,
-                skip_duplicate_check=skip_duplicate
+                job_id=job_id,
+                skip_duplicate_check=skip_duplicate,
             )
         return result
     except Exception as e:
         return {"success": False, "message": str(e), "can_resume": False}
 
 
-def render_sidebar(model_name_key: str = "model_select"):
+def render_sidebar():
     """Render the sidebar with configuration options."""
     with st.sidebar:
         st.header("⚙️ Configuration")
-        
-        # Model Selection
-        model_name = st.selectbox(
-            "Select LLM Model",
-            options=["qwen2.5:7b", "llama3.1", "llama3.1:8b", "llama3.2", "llama3.2:3b"],
-            index=0,
-            help="Choose the Ollama model for the agent's reasoning",
-            key=model_name_key
+
+        # ── API Keys ──────────────────────────────────────────────────────────
+        st.subheader("🔑 API Keys")
+        st.caption("Phase 1 (Discovery) uses Groq + Tavily. Phase 2 (Apply) uses your cloud GPU.")
+
+        groq_key = st.text_input(
+            "Groq API Key",
+            value=st.session_state.groq_api_key,
+            type="password",
+            help="Get a free key at console.groq.com — used for Llama-3.3-70B Phase 1 research",
         )
-        
+        if groq_key != st.session_state.groq_api_key:
+            st.session_state.groq_api_key = groq_key
+            os.environ["GROQ_API_KEY"] = groq_key
+
+        tavily_key = st.text_input(
+            "Tavily API Key",
+            value=st.session_state.tavily_api_key,
+            type="password",
+            help="Get a key at app.tavily.com — used for company research and fallback search",
+        )
+        if tavily_key != st.session_state.tavily_api_key:
+            st.session_state.tavily_api_key = tavily_key
+            os.environ["TAVILY_API_KEY"] = tavily_key
+
+        gpu_endpoint = st.text_input(
+            "Cloud GPU Endpoint URL",
+            value=st.session_state.runpod_endpoint_url,
+            placeholder="https://api.runpod.ai/v2/<id>/openai/v1",
+            help="RunPod or Vast.ai vLLM endpoint hosting Qwen2.5-Coder-32B",
+        )
+        if gpu_endpoint != st.session_state.runpod_endpoint_url:
+            st.session_state.runpod_endpoint_url = gpu_endpoint
+            os.environ["RUNPOD_ENDPOINT_URL"] = gpu_endpoint
+
+        gpu_key = st.text_input(
+            "Cloud GPU API Key",
+            value=st.session_state.runpod_api_key,
+            type="password",
+            help="RunPod / Vast.ai API key for Qwen2.5-Coder-32B Phase 2 inference",
+        )
+        if gpu_key != st.session_state.runpod_api_key:
+            st.session_state.runpod_api_key = gpu_key
+            os.environ["RUNPOD_API_KEY"] = gpu_key
+
+        # API key status indicators
+        api_ready = all([
+            st.session_state.groq_api_key,
+            st.session_state.tavily_api_key,
+            st.session_state.runpod_endpoint_url,
+            st.session_state.runpod_api_key,
+        ])
+        if api_ready:
+            st.success("✓ All API keys configured")
+        else:
+            missing = [
+                name for name, val in [
+                    ("Groq", st.session_state.groq_api_key),
+                    ("Tavily", st.session_state.tavily_api_key),
+                    ("GPU Endpoint", st.session_state.runpod_endpoint_url),
+                    ("GPU Key", st.session_state.runpod_api_key),
+                ]
+                if not val
+            ]
+            st.warning(f"Missing: {', '.join(missing)}")
+
+        st.divider()
+
+        # ── Active Model Info ─────────────────────────────────────────────────
+        st.subheader("🧠 Active Models")
+        phase1_ready = bool(st.session_state.groq_api_key and st.session_state.tavily_api_key)
+        phase2_ready = bool(st.session_state.runpod_endpoint_url and st.session_state.runpod_api_key)
+
+        p1_icon = "✅" if phase1_ready else "⚠️"
+        p2_icon = "✅" if phase2_ready else "⚠️"
+
+        st.markdown(
+            f"{p1_icon} **Phase 1** — Groq / `llama-3.3-70b-versatile`\n\n"
+            f"{p2_icon} **Phase 2** — `qwen2.5-coder-32b-instruct` (cloud GPU)"
+        )
+        if not phase1_ready:
+            st.caption("Set Groq + Tavily keys to enable Phase 1 research.")
+        if not phase2_ready:
+            st.caption("Set GPU Endpoint + Key to enable Phase 2 applications.")
+
         st.divider()
         
         # Notification Settings
@@ -333,13 +430,11 @@ def render_sidebar(model_name_key: str = "model_select"):
         # Quick links
         st.header("📖 Mode Guide")
         st.markdown("""
-        - **🔍 Discover**: Find jobs from GitHub
-        - **🚀 Auto-Apply**: Batch apply to queue
-        - **📝 Manual**: Apply to single URL
+        - **🔍 Discover**: Find & research jobs (Phase 1)
+        - **🚀 Auto-Apply**: Batch apply to queue (Phase 2)
+        - **📝 Manual**: Apply to single URL (Phase 2)
         - **📚 History**: Track applications
         """)
-    
-    return model_name
 
 
 def render_discover_tab():
@@ -371,20 +466,41 @@ def render_discover_tab():
             help="Comma-separated keywords (leave empty for default SWE/AI/DS)"
         )
     
+    # Research toggle
+    run_phase1 = st.checkbox(
+        "Run Phase 1 Research after discovering",
+        value=False,
+        help="Automatically research each new job via Groq + Tavily and pre-generate cover letters. "
+             "Requires Groq and Tavily API keys to be configured.",
+    )
+
     # Search button
     col_btn1, col_btn2 = st.columns([1, 3])
     with col_btn1:
         search_clicked = st.button("🔍 Search Jobs", use_container_width=True)
-    
+
     if search_clicked:
-        with st.spinner("Fetching jobs from GitHub repositories..."):
-            locations = [l.strip() for l in location_filter.split(",")] if location_filter else None
-            keywords = [k.strip() for k in keyword_filter.split(",")] if keyword_filter else None
-            
+        _sync_api_keys_to_env()
+        profile_content = load_profile() if run_phase1 else ""
+        if run_phase1 and not profile_content:
+            st.warning("my_profile.md not found — Phase 1 research skipped.")
+            run_phase1 = False
+
+        spinner_msg = (
+            "Fetching jobs and running Phase 1 research (this may take a few minutes)..."
+            if run_phase1
+            else "Fetching jobs from GitHub repositories..."
+        )
+        with st.spinner(spinner_msg):
+            locations = [loc.strip() for loc in location_filter.split(",")] if location_filter else None
+            keywords = [kw.strip() for kw in keyword_filter.split(",")] if keyword_filter else None
+
             jobs = get_job_urls_sync(
                 keywords=keywords,
                 locations=locations,
-                job_type=job_type if job_type != "all" else None
+                job_type=job_type if job_type != "all" else None,
+                run_research=run_phase1,
+                profile_content=profile_content,
             )
             st.session_state.scraped_jobs = jobs
     
@@ -485,15 +601,15 @@ def render_discover_tab():
         st.info("Click 'Search Jobs' to discover opportunities from GitHub job boards.")
 
 
-def render_auto_apply_tab(model_name: str):
-    """Render the auto-apply tab."""
+def render_auto_apply_tab():
+    """Render the auto-apply tab (Phase 2)."""
     st.header("🚀 Auto-Apply Mode")
-    st.markdown("Automatically apply to all queued jobs. You only intervene for CAPTCHAs.")
-    
+    st.markdown("Phase 2: Autonomously fills application forms using pre-researched data. You only intervene for CAPTCHAs.")
+
     db = get_db()
     queued_jobs = db.get_all_applications(status=ApplicationStatus.QUEUED, limit=500)
     resume_path = get_resume_path()
-    
+
     # Status overview
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -504,30 +620,79 @@ def render_auto_apply_tab(model_name: str):
     with col3:
         failed = len(db.get_all_applications(status=ApplicationStatus.FAILED, limit=1000))
         st.metric("❌ Failed", failed)
-    
+
     st.markdown("---")
-    
+
     if not resume_path:
         st.error("❌ No resume found! Please add your resume PDF to the project folder.")
         return
-    
+
     if not queued_jobs:
         st.info("📭 No jobs in queue. Go to **Discover** tab to find and queue jobs.")
         return
-    
+
+    # Phase 1 readiness check
+    jobs_missing_research = [
+        job for job in queued_jobs
+        if db.get_job_requirements(job.id) is None
+    ]
+
+    if jobs_missing_research:
+        st.warning(
+            f"⚠️ **{len(jobs_missing_research)} of {len(queued_jobs)} queued jobs have not been researched** "
+            f"(no Phase 1 data cached). Running Phase 2 without research means the agent will have "
+            f"no pre-generated cover letters, salary data, or 'why here' answers."
+        )
+        col_disc1, col_disc2 = st.columns([1, 3])
+        with col_disc1:
+            if st.button("🔬 Run Discovery Now", use_container_width=True, type="secondary"):
+                _sync_api_keys_to_env()
+                profile_content = load_profile()
+                if not profile_content:
+                    st.error("my_profile.md not found — cannot run research.")
+                elif not os.environ.get("GROQ_API_KEY") or not os.environ.get("TAVILY_API_KEY"):
+                    st.error("Groq and Tavily API keys must be configured in the sidebar.")
+                else:
+                    import httpx as _httpx
+                    from job_scraper import process_discovered_job
+                    progress = st.progress(0)
+                    researched = 0
+                    total = len(jobs_missing_research)
+                    with st.spinner(f"Running Phase 1 research for {total} jobs..."):
+                        async def _run_research():
+                            async with _httpx.AsyncClient(timeout=30.0) as client:
+                                for i, job_app in enumerate(jobs_missing_research):
+                                    from job_scraper import JobListing
+                                    listing = JobListing(
+                                        company=job_app.company,
+                                        role=job_app.role,
+                                        location=job_app.location or "",
+                                        apply_url=job_app.job_url,
+                                        source_repo=job_app.source or "",
+                                    )
+                                    await process_discovered_job(listing, profile_content, client)
+                                    progress.progress((i + 1) / total)
+                        asyncio.run(_run_research())
+                    st.success(f"Phase 1 research complete for {total} jobs!")
+                    st.rerun()
+
+    st.markdown("---")
+
     # Queue preview
     st.subheader(f"📋 Queue Preview (Next {min(10, len(queued_jobs))} jobs)")
     for i, job in enumerate(queued_jobs[:10]):
-        st.markdown(f"{i+1}. **{job.company}** - {job.role} ({job.location or 'Unknown'})")
-    
+        has_research = db.get_job_requirements(job.id) is not None
+        research_badge = "🔬" if has_research else "⚠️"
+        st.markdown(f"{i+1}. {research_badge} **{job.company}** - {job.role} ({job.location or 'Unknown'})")
+
     if len(queued_jobs) > 10:
         st.caption(f"... and {len(queued_jobs) - 10} more")
-    
+
     st.markdown("---")
-    
+
     # Control buttons
     col_btn1, col_btn2, col_btn3 = st.columns(3)
-    
+
     with col_btn1:
         if not st.session_state.auto_apply_running:
             if st.button("▶️ Start Auto-Apply", use_container_width=True, type="primary"):
@@ -592,6 +757,7 @@ def render_auto_apply_tab(model_name: str):
         
         # Run the agent
         try:
+            _sync_api_keys_to_env()
             # Check if we're resuming a session
             resume_session = st.session_state.get("pending_resume_session")
             if resume_session:
@@ -599,20 +765,20 @@ def render_auto_apply_tab(model_name: str):
                 result = asyncio.run(run_agent_for_job(
                     job_url=current_job.job_url,
                     resume_path=resume_path,
-                    model_name=model_name,
                     company=current_job.company,
                     role=current_job.role,
+                    job_id=current_job.id,
                     skip_duplicate=True,
-                    resume_session_id=resume_session
+                    resume_session_id=resume_session,
                 ))
             else:
                 result = asyncio.run(run_agent_for_job(
                     job_url=current_job.job_url,
                     resume_path=resume_path,
-                    model_name=model_name,
                     company=current_job.company,
                     role=current_job.role,
-                    skip_duplicate=True
+                    job_id=current_job.id,
+                    skip_duplicate=True,
                 ))
             
             if result.get("success"):
@@ -660,8 +826,8 @@ def render_auto_apply_tab(model_name: str):
         st.info("No activity yet. Start auto-apply to see logs.")
 
 
-def render_manual_tab(model_name: str):
-    """Render the manual application tab."""
+def render_manual_tab():
+    """Render the manual application tab (Phase 2)."""
     st.header("📝 Manual Application")
     st.markdown("Apply to a single job by pasting its URL.")
     
@@ -675,8 +841,9 @@ def render_manual_tab(model_name: str):
         help="Paste the direct link to the job application page"
     )
     
-    # Check for duplicate
+    # Check for duplicate and retrieve existing app ID (preserves Phase 1 data)
     is_duplicate = False
+    existing_app = None
     if job_url:
         existing_app = db.get_application_by_url(job_url)
         if existing_app:
@@ -706,17 +873,18 @@ def render_manual_tab(model_name: str):
         button_label = "🔄 Re-apply Anyway" if is_duplicate else "🚀 Start Agent"
         
         if st.button(button_label, disabled=start_disabled, use_container_width=True):
+            _sync_api_keys_to_env()
             st.session_state.agent_running = True
             st.session_state.agent_logs = []
             add_log(f"Starting agent for: {job_url}", "action")
-            
+
             result = asyncio.run(run_agent_for_job(
                 job_url=job_url,
                 resume_path=resume_path,
-                model_name=model_name,
-                company=company_name or None,
-                role=role_title or None,
-                skip_duplicate=is_duplicate
+                company=company_name or (existing_app.company if existing_app else None),
+                role=role_title or (existing_app.role if existing_app else None),
+                job_id=existing_app.id if existing_app else None,
+                skip_duplicate=is_duplicate,
             ))
             
             st.session_state.agent_running = False
@@ -735,14 +903,15 @@ def render_manual_tab(model_name: str):
         # Resume button if there's a pending session
         resume_disabled = not st.session_state.pending_resume_session or st.session_state.agent_running
         if st.button("🔄 Resume Session", disabled=resume_disabled, use_container_width=True):
+            _sync_api_keys_to_env()
             st.session_state.agent_running = True
-            add_log(f"Resuming session...", "action")
-            
+            add_log("Resuming session...", "action")
+
             result = asyncio.run(run_agent_for_job(
                 job_url=job_url or "",
-                resume_path=resume_path,
-                model_name=model_name,
-                resume_session_id=st.session_state.pending_resume_session
+                resume_path=resume_path or "",
+                job_id=existing_app.id if existing_app else None,
+                resume_session_id=st.session_state.pending_resume_session,
             ))
             
             st.session_state.agent_running = False
@@ -875,7 +1044,7 @@ def main():
     
     # Header
     st.markdown('<p class="main-header">🤖 AI Job Application Agent</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Fully automated job applications • Privacy-first • 100% local</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Two-phase cloud pipeline • Groq 70B research + Qwen 32B browser automation</p>', unsafe_allow_html=True)
     
     # Check for pending session resume at startup
     if st.session_state.pending_resume_session:
@@ -885,29 +1054,29 @@ def main():
         if state:
             st.info(f"🔄 Ready to resume: **{state.role}** at **{state.company}**")
     
-    # Sidebar
-    model_name = render_sidebar()
-    
+    # Sidebar (returns nothing — model is now fixed per phase)
+    render_sidebar()
+
     # Main tabs
     tab1, tab2, tab3, tab4 = st.tabs(["🔍 Discover", "🚀 Auto-Apply", "📝 Manual", "📚 History"])
-    
+
     with tab1:
         render_discover_tab()
-    
+
     with tab2:
-        render_auto_apply_tab(model_name)
-    
+        render_auto_apply_tab()
+
     with tab3:
-        render_manual_tab(model_name)
-    
+        render_manual_tab()
+
     with tab4:
         render_history_tab()
-    
+
     # Footer
     st.markdown("---")
     st.markdown("""
     <div style="text-align: center; color: #9CA3AF; font-size: 0.875rem;">
-        🔒 All data stays on your machine • Powered by Ollama • No external APIs
+        🔒 Personal data stays local • Phase 1: Groq Llama-3.3-70B • Phase 2: Qwen2.5-Coder-32B on cloud GPU
     </div>
     """, unsafe_allow_html=True)
 

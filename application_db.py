@@ -70,6 +70,61 @@ class SavedAnswer:
     used_count: int
 
 
+@dataclass
+class CompanyInfo:
+    """Cached company research data populated by Phase 1 discovery."""
+    id: Optional[int]
+    name: str
+    website: Optional[str]
+    about_summary: Optional[str]
+    values_summary: Optional[str]
+    salary_data: Optional[str]
+    competitors: Optional[str]
+    recent_news: Optional[str]
+    last_researched: Optional[str]
+    created_at: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "CompanyInfo":
+        keys = row.keys()
+        return cls(
+            id=row["id"],
+            name=row["name"],
+            website=row["website"],
+            about_summary=row["about_summary"],
+            values_summary=row["values_summary"],
+            salary_data=row["salary_data"],
+            competitors=row["competitors"] if "competitors" in keys else None,
+            recent_news=row["recent_news"] if "recent_news" in keys else None,
+            last_researched=row["last_researched"],
+            created_at=row["created_at"],
+        )
+
+
+@dataclass
+class JobRequirement:
+    """Job-specific data extracted and cached during Phase 1 discovery."""
+    id: Optional[int]
+    job_id: int
+    tech_stack: Optional[str]
+    skills_required: Optional[str]
+    salary_range: Optional[str]
+    cover_letter_text: Optional[str]
+    created_at: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "JobRequirement":
+        return cls(
+            id=row["id"],
+            job_id=row["job_id"],
+            tech_stack=row["tech_stack"],
+            skills_required=row["skills_required"],
+            salary_range=row["salary_range"],
+            cover_letter_text=row["cover_letter_text"],
+            created_at=row["created_at"],
+        )
+
+
 class ApplicationDatabase:
     """
     SQLite database manager for tracking job applications.
@@ -167,7 +222,33 @@ class ApplicationDatabase:
                 created_at TEXT NOT NULL
             )
         """)
-        
+
+        # Migrate existing companies table to add V2 columns (safe for existing DBs)
+        for col, col_type in [("competitors", "TEXT"), ("recent_news", "TEXT")]:
+            try:
+                cursor.execute(f"ALTER TABLE companies ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+        # Job requirements table - Phase 1 extracted data linked to each application
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS job_requirements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                tech_stack TEXT,
+                skills_required TEXT,
+                salary_range TEXT,
+                cover_letter_text TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (job_id) REFERENCES applications(id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_job_requirements_job_id
+            ON job_requirements(job_id)
+        """)
+
         conn.commit()
         conn.close()
     
@@ -382,15 +463,15 @@ class ApplicationDatabase:
         conn.close()
         return answer_id
     
-    def find_answer(self, question: str, company: Optional[str] = None) -> Optional[str]:
-        """Find a saved answer matching the question."""
+    def find_answer(self, question: str, company: Optional[str] = None) -> Optional[SavedAnswer]:
+        """Find a saved answer matching the question, returning a SavedAnswer object."""
         conn = self._get_connection()
         cursor = conn.cursor()
-        
+
         # First try company-specific answers
         if company:
             cursor.execute("""
-                SELECT answer FROM saved_answers 
+                SELECT * FROM saved_answers
                 WHERE company = ? AND ? LIKE '%' || question_pattern || '%'
                 ORDER BY used_count DESC
                 LIMIT 1
@@ -398,19 +479,35 @@ class ApplicationDatabase:
             row = cursor.fetchone()
             if row:
                 conn.close()
-                return row["answer"]
-        
+                return SavedAnswer(
+                    id=row["id"],
+                    question_pattern=row["question_pattern"],
+                    answer=row["answer"],
+                    company=row["company"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                    used_count=row["used_count"],
+                )
+
         # Fall back to generic answers
         cursor.execute("""
-            SELECT answer FROM saved_answers 
+            SELECT * FROM saved_answers
             WHERE company IS NULL AND ? LIKE '%' || question_pattern || '%'
             ORDER BY used_count DESC
             LIMIT 1
         """, (question.lower(),))
         row = cursor.fetchone()
         conn.close()
-        
-        return row["answer"] if row else None
+
+        if row:
+            return SavedAnswer(
+                id=row["id"],
+                question_pattern=row["question_pattern"],
+                answer=row["answer"],
+                company=row["company"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                used_count=row["used_count"],
+            )
+        return None
     
     # ==================== Company Cache ====================
     
@@ -420,40 +517,91 @@ class ApplicationDatabase:
         website: Optional[str] = None,
         about_summary: Optional[str] = None,
         values_summary: Optional[str] = None,
-        salary_data: Optional[str] = None
+        salary_data: Optional[str] = None,
+        competitors: Optional[str] = None,
+        recent_news: Optional[str] = None,
     ) -> None:
-        """Cache company research data."""
+        """Cache company research data (Phase 1 output)."""
         conn = self._get_connection()
         cursor = conn.cursor()
-        
+
         now = datetime.now().isoformat()
-        
+
         cursor.execute("""
-            INSERT INTO companies (name, website, about_summary, values_summary, salary_data, last_researched, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO companies
+                (name, website, about_summary, values_summary, salary_data,
+                 competitors, recent_news, last_researched, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 website = COALESCE(excluded.website, website),
                 about_summary = COALESCE(excluded.about_summary, about_summary),
                 values_summary = COALESCE(excluded.values_summary, values_summary),
                 salary_data = COALESCE(excluded.salary_data, salary_data),
+                competitors = COALESCE(excluded.competitors, competitors),
+                recent_news = COALESCE(excluded.recent_news, recent_news),
                 last_researched = excluded.last_researched
-        """, (name, website, about_summary, values_summary, salary_data, now, now))
-        
+        """, (name, website, about_summary, values_summary, salary_data,
+               competitors, recent_news, now, now))
+
         conn.commit()
         conn.close()
-    
-    def get_company_info(self, name: str) -> Optional[dict]:
-        """Get cached company info."""
+
+    def get_company_info(self, name: str) -> Optional[CompanyInfo]:
+        """Get cached company info as a CompanyInfo dataclass."""
         conn = self._get_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("SELECT * FROM companies WHERE name = ?", (name,))
         row = cursor.fetchone()
         conn.close()
-        
-        if row:
-            return dict(row)
-        return None
+
+        return CompanyInfo.from_row(row) if row else None
+
+    # ==================== Job Requirements (Phase 1 cache) ====================
+
+    def save_job_requirements(
+        self,
+        job_id: int,
+        tech_stack: Optional[str] = None,
+        skills_required: Optional[str] = None,
+        salary_range: Optional[str] = None,
+        cover_letter_text: Optional[str] = None,
+    ) -> int:
+        """
+        Save Phase 1 extracted job requirements linked to an application ID.
+
+        Returns:
+            The new job_requirements row ID.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        now = datetime.now().isoformat()
+
+        cursor.execute("""
+            INSERT INTO job_requirements
+                (job_id, tech_stack, skills_required, salary_range, cover_letter_text, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (job_id, tech_stack, skills_required, salary_range, cover_letter_text, now))
+
+        conn.commit()
+        row_id = cursor.lastrowid
+        conn.close()
+        return row_id
+
+    def get_job_requirements(self, job_id: int) -> Optional[JobRequirement]:
+        """Get the Phase 1 cached job requirements for an application."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT * FROM job_requirements WHERE job_id = ? ORDER BY id DESC LIMIT 1",
+            (job_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        return JobRequirement.from_row(row) if row else None
 
 
 # Singleton instance for easy import
