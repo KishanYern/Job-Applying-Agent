@@ -118,6 +118,13 @@ def _build_search_tools(company: str):
         return None
 
 
+def _extract_candidate_name(profile_content: str) -> str:
+    """Extract the candidate's name from the profile using a robust regex."""
+    import re
+    match = re.search(r'^Name:\s*(.+)$', profile_content, re.MULTILINE)
+    return match.group(1).strip() if match else "the candidate"
+
+
 def build_system_prompt(
     profile_content: str,
     company: str = "the company",
@@ -127,88 +134,94 @@ def build_system_prompt(
     """
     Build the Phase 2 system prompt with all pre-researched data injected.
     Queries the SQLite DB for cached company info, job requirements, and answers.
+
+    Only includes fields that have actual data — omits 'Not available' fields
+    to minimize token usage and give the model more reasoning room.
     """
     db = get_db()
     company_info = db.get_company_info(company) if company != "the company" else None
     job_reqs = db.get_job_requirements(job_id) if job_id else None
     why_here_answer = db.find_answer("why do you want to work here", company)
 
-    # Extract pre-researched fields with safe fallbacks
-    values_summary = (company_info.values_summary if company_info else None) or "Not available"
-    about_summary = (company_info.about_summary if company_info else None) or "Not available"
-    competitors = (company_info.competitors if company_info else None) or "Not available"
-    recent_news = (company_info.recent_news if company_info else None) or "Not available"
-    tech_stack = (job_reqs.tech_stack if job_reqs else None) or "Not available"
-    skills_required = (job_reqs.skills_required if job_reqs else None) or "Not available"
-    salary_range = (job_reqs.salary_range if job_reqs else None) or "Not available"
+    # Extract pre-researched fields — only include lines with real data
+    company_data_lines = []
+    for label, value in [
+        ("Values / Mission", company_info.values_summary if company_info else None),
+        ("About / Products", company_info.about_summary if company_info else None),
+        ("Competitors", company_info.competitors if company_info else None),
+        ("Recent News", company_info.recent_news if company_info else None),
+    ]:
+        if value:
+            company_data_lines.append(f"- **{label}:** {value}")
+
+    company_section = (
+        "\n".join(company_data_lines) if company_data_lines
+        else "No pre-researched company data available. Use the search_missing_info tool if needed."
+    )
+
+    job_req_lines = []
+    for label, value in [
+        ("Tech Stack", job_reqs.tech_stack if job_reqs else None),
+        ("Skills Required", job_reqs.skills_required if job_reqs else None),
+        ("Salary Range", job_reqs.salary_range if job_reqs else None),
+    ]:
+        if value:
+            job_req_lines.append(f"- **{label}:** {value}")
+
+    job_section = (
+        "\n".join(job_req_lines) if job_req_lines
+        else "No pre-extracted job requirements available. Use the search_missing_info tool if needed."
+    )
+
+    why_here = (why_here_answer.answer if why_here_answer else None) or ""
     cover_letter = (job_reqs.cover_letter_text if job_reqs else None) or ""
     cover_letter_pdf_path = (job_reqs.cover_letter_pdf_path if job_reqs else None) or ""
-    why_here = (why_here_answer.answer if why_here_answer else None) or "Not available"
 
-    cover_letter_section = (
-        f"## PRE-GENERATED COVER LETTER\n{cover_letter}"
-        if cover_letter
-        else "## PRE-GENERATED COVER LETTER\nNot available — write one using the profile and company data above."
-    )
+    # Only expose the filename, not the full local path, to the remote LLM
+    from pathlib import Path as _Path
+    cover_letter_pdf_display = _Path(cover_letter_pdf_path).name if cover_letter_pdf_path else ""
 
-    cover_letter_pdf_section = (
-        f"## COVER LETTER PDF FILE\n{cover_letter_pdf_path}"
-        if cover_letter_pdf_path
-        else "## COVER LETTER PDF FILE\nNot available"
-    )
+    # Build optional sections — only include if data exists
+    optional_sections = []
 
-    candidate_name = (
-        profile_content.split("Name:")[1].split("\n")[0].strip()
-        if "Name:" in profile_content
-        else "the candidate"
-    )
+    if why_here:
+        optional_sections.append(f"## \"WHY DO YOU WANT TO WORK HERE?\" ANSWER (pre-synthesized)\n{why_here}")
 
-    return f"""You are an autonomous job application agent. Your task is to fill out job application forms accurately and professionally using the candidate's profile and the pre-researched data provided below.
+    if cover_letter:
+        optional_sections.append(f"## PRE-GENERATED COVER LETTER\n{cover_letter}")
 
-## CANDIDATE PROFILE (Source of Truth for all personal data)
-{profile_content}
+    if cover_letter_pdf_display:
+        optional_sections.append(f"## COVER LETTER PDF FILE\n{cover_letter_pdf_display}")
 
-## PRE-RESEARCHED COMPANY DATA (from Phase 1 discovery pipeline)
-- **Values / Mission:** {values_summary}
-- **About / Products:** {about_summary}
-- **Competitors:** {competitors}
-- **Recent News:** {recent_news}
+    optional_block = "\n\n".join(optional_sections)
 
-## JOB REQUIREMENTS (extracted from job description)
-- **Tech Stack:** {tech_stack}
-- **Skills Required:** {skills_required}
-- **Salary Range:** {salary_range}
+    candidate_name = _extract_candidate_name(profile_content)
 
-## "WHY DO YOU WANT TO WORK HERE?" ANSWER (pre-synthesized)
-{why_here}
+    return f"""You are an autonomous job application agent. Fill out job application forms accurately using the candidate profile and pre-researched data below.
 
-{cover_letter_section}
+## PRE-RESEARCHED COMPANY DATA
+{company_section}
 
-{cover_letter_pdf_section}
+## JOB REQUIREMENTS
+{job_section}
+
+{optional_block}
 
 ## FORM FILLING RULES
-1. **Match fields carefully**: Map form labels (e.g., "First Name", "Email", "Phone") to the candidate profile.
-2. **Be precise**: Use exact values from the profile. Do not paraphrase names, emails, or phone numbers.
-3. **Handle dropdowns**: Select the closest matching option.
-4. **File uploads**: If asked to upload a resume, use the file selector.
-5. **Salary fields**: Use the pre-researched Salary Range above. If it is "Not available", use the search_missing_info tool.
-6. **"Why here" fields**: Use the pre-synthesized answer above verbatim or lightly adapted.
-7. **Cover letter text fields**: Paste the Pre-Generated Cover Letter above. If it is not available, write one from the profile and company data.
-8. **Cover letter file uploads**: If a cover letter file upload field is detected, upload the PDF file listed in the COVER LETTER PDF FILE section above. If that path is "Not available", alert the user that a cover letter file is needed.
-9. **DO NOT open new browser tabs** for any reason. Use the search_missing_info tool for any missing data.
-10. **Unforeseen short-answer or essay questions**: If any form field asks a behavioral, technical, or subjective question not covered above (e.g., "Tell us about a challenging project", "Describe a complex problem you solved"), compose a concise, professional answer (2-4 sentences) using ONLY facts, experiences, and skills explicitly stated in the CANDIDATE PROFILE section above. Never invent experiences, metrics, or projects not present in the profile. If the profile contains no relevant information for the question, enter: "Please see my attached resume for details."
+1. Map form labels to the CANDIDATE PROFILE provided in the task. Use exact values — never paraphrase names, emails, or phone numbers.
+2. Handle dropdowns by selecting the closest matching option.
+3. For resume uploads, use the file selector with the path given in the task.
+4. For salary fields, use the Salary Range above. If unavailable, call search_missing_info.
+5. For "Why here" fields, use the pre-synthesized answer above verbatim or lightly adapted.
+6. For cover letter text fields, paste the Pre-Generated Cover Letter. If unavailable, write one from the profile and company data.
+7. For cover letter file uploads, upload the PDF listed above. If unavailable, alert the user.
+8. DO NOT open new browser tabs. Use search_missing_info for missing data.
+9. For unforeseen behavioral/subjective questions, compose a 2-4 sentence answer using ONLY facts from the CANDIDATE PROFILE. Never invent information. If nothing relevant exists, write: "Please see my attached resume for details."
 
-## CRITICAL SAFETY RULES
-1. **NEVER submit** the application without explicit user confirmation.
-2. **STOP and alert** if you detect a CAPTCHA — do not attempt to solve it.
-3. **STOP and alert** if a login is required — the user must handle authentication.
-4. **STOP and alert** if you are uncertain about a field — do not guess personal data.
-5. **Be patient**: Wait for pages to load fully before interacting.
-
-## NAVIGATION TIPS
-- Look for "Apply", "Submit Application", or similar buttons to start.
-- Handle multi-page applications by clicking "Next" or "Continue".
-- Watch for confirmation messages to know when sections are complete.
+## SAFETY RULES
+- NEVER submit the application without user confirmation.
+- STOP and alert if you detect a CAPTCHA, login requirement, or are uncertain about a field.
+- Wait for pages to load fully before interacting.
 
 You are applying as: {candidate_name}
 """
@@ -390,33 +403,32 @@ async def run_agent(
         # Build on-the-spot Tavily fallback tool (browser-use Tools object)
         search_tools = _build_search_tools(company_name)
 
+        # Cover letter PDF: agent needs the full local path to upload the file,
+        # but system prompt only shows the filename for privacy. Provide full
+        # path only in the task message which stays within the agent session.
+        cover_letter_pdf_full = ""
+        if job_id:
+            _jreqs = db.get_job_requirements(job_id)
+            if _jreqs and _jreqs.cover_letter_pdf_path:
+                cover_letter_pdf_full = _jreqs.cover_letter_pdf_path
+
         task = f"""
 NAVIGATE TO: {job_url}
 
-YOUR GOAL:
-Complete the job application form up to the review stage. DO NOT SUBMIT.
+GOAL: Complete the job application form up to the review stage. DO NOT SUBMIT.
 
 APPLYING FOR: {role_name} at {company_name}
 
-EXECUTION STEPS:
-1. **Login / Start:** If a login is required, look for "Apply without account". If blocked by a complex login, PAUSE and ask the user.
-2. **Resume Upload:** Upload the file at: "{resume_path}".
-3. **Form Filling:**
-   - Map profile data to each field using the CANDIDATE PROFILE in the system prompt.
-   - For salary fields: use the pre-researched Salary Range. If "Not available", call search_missing_info.
-   - For "Why do you want to work here?": use the PRE-SYNTHESIZED ANSWER from the system prompt.
-   - For cover letter text fields: paste the PRE-GENERATED COVER LETTER from the system prompt.
-   - For cover letter file uploads: upload the PDF file specified in the COVER LETTER PDF FILE section of the system prompt. If the path is "Not available", alert the user.
-   - For any unforeseen behavioral, technical, or subjective questions: compose a short answer (2-4 sentences) using ONLY facts from the CANDIDATE PROFILE. Never invent information. If nothing relevant is in the profile, write: "Please see my attached resume for details."
-   - DO NOT open new browser tabs for any reason.
-4. **Review:** Click "Next" until you reach the "Review" or "Final Submit" page.
-5. **HALT:** Stop immediately upon reaching the final page. Notify the user: "Application ready for review."
+## CANDIDATE PROFILE
+{profile_content}
 
-CRITICAL RULES:
-- NEVER click "Submit Application".
-- If you see a CAPTCHA, stop and alert the user.
-- Only use data from the CANDIDATE PROFILE — do not hallucinate personal information.
-- Use the search_missing_info tool (not the browser) for any data gaps.
+EXECUTION STEPS:
+1. If a login is required, look for "Apply without account". If blocked, PAUSE and ask the user.
+2. Upload the resume at: "{resume_path}".
+3. Fill all form fields using the CANDIDATE PROFILE above and the pre-researched data in the system prompt.
+4. For cover letter file uploads, use: "{cover_letter_pdf_full}" (if empty, alert the user).
+5. Click "Next" / "Continue" until you reach the review page.
+6. HALT immediately. Notify the user: "Application ready for review."
 """
 
         # Run agent with browser crash retry loop
@@ -510,9 +522,24 @@ CRITICAL RULES:
 
         log("Agent completed its run", "success")
 
+        # Basic validation: check that the result looks like real progress
+        result_str = str(result).lower() if result else ""
+        likely_success = any(
+            signal in result_str
+            for signal in ["review", "ready", "filled", "complete", "submitted", "next"]
+        )
+
         if application_id:
-            db.update_status(application_id, ApplicationStatus.COMPLETED)
-            log(f"Application #{application_id} marked as completed", "success")
+            final_status = ApplicationStatus.COMPLETED if likely_success else ApplicationStatus.IN_PROGRESS
+            db.update_status(application_id, final_status)
+            if likely_success:
+                log(f"Application #{application_id} marked as completed", "success")
+            else:
+                log(
+                    f"Application #{application_id} finished but could not confirm progress — "
+                    f"marked as in_progress for manual review",
+                    "warning",
+                )
 
         state_manager.mark_completed(state)
         notify_success(company_name, role_name)

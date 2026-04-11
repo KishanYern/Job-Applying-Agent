@@ -8,7 +8,7 @@ The Problem: Applying to jobs is tedious. A single application typically require
 
 The Solution: A two-phase AI pipeline. Phase 1 pre-researches every company and pre-generates all application materials in the background using a serverless 70B model. Phase 2 runs the browser automation against a remote 32B coding model on a rented cloud GPU, filling forms using only pre-cached data — no live research, no multi-tab browsing, no local GPU required.
 
-Key Constraint: Personal data (resume, phone number, address) must stay local. It is written into a local SQLite DB and a local profile file and never sent to a third-party storage service. External APIs (Groq, Tavily, RunPod) only receive job descriptions and company names — not the user's personal details.
+Key Constraint: Personal data (resume, phone number, address) is stored locally in a SQLite DB and a profile file — never sent to a third-party storage service. Phase 1 APIs (Groq, Tavily) only receive job descriptions and company names. Phase 2 requires sending the candidate profile to your cloud GPU endpoint (RunPod/Vast.ai) so the browser agent can fill application forms. Use an endpoint you control to keep PII within your trust boundary.
 
 2. The Tech Stack
 
@@ -110,4 +110,4 @@ Phase Ordering: Phase 1 must complete for a job before Phase 2 runs. The UI enfo
 
 Error Handling: If the cloud GPU endpoint is unavailable, fail gracefully with a clear "RUNPOD_ENDPOINT_URL not configured" message. If Groq/Tavily fail during Phase 1, log a warning and continue — Phase 2 will use the search_missing_info fallback tool.
 
-Privacy: Personal data from my_profile.md is only injected locally into the system prompt. It is never sent to Tavily or Groq — only company names and job descriptions are sent to external APIs.
+Privacy: Phase 1 (Groq, Tavily) never receives personal data — only company names and job descriptions. Phase 2 sends the candidate profile to your cloud GPU endpoint so the browser agent can fill forms. Use an endpoint you own/control. Personal data is never sent to third-party storage services.

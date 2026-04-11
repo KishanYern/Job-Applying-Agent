@@ -150,14 +150,21 @@ class ApplicationDatabase:
         # Ensure the data directory exists
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         
+        # Persistent connection for the singleton instance.
+        # SQLite in WAL mode handles concurrent reads safely;
+        # all writes go through this single connection.
+        self._conn: Optional[sqlite3.Connection] = None
+
         # Initialize the database
         self._init_db()
     
     def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection with row factory enabled."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        """Get the persistent database connection (creates it on first call)."""
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        return self._conn
     
     def _init_db(self) -> None:
         """Initialize the database schema."""
@@ -259,7 +266,6 @@ class ApplicationDatabase:
             pass  # Column already exists
 
         conn.commit()
-        conn.close()
     
     # ==================== Application CRUD ====================
     
@@ -297,8 +303,6 @@ class ApplicationDatabase:
         except sqlite3.IntegrityError:
             # Duplicate URL
             return None
-        finally:
-            conn.close()
     
     def get_application(self, application_id: int) -> Optional[Application]:
         """Get an application by ID."""
@@ -307,7 +311,6 @@ class ApplicationDatabase:
         
         cursor.execute("SELECT * FROM applications WHERE id = ?", (application_id,))
         row = cursor.fetchone()
-        conn.close()
         
         return Application.from_row(row) if row else None
     
@@ -318,7 +321,6 @@ class ApplicationDatabase:
         
         cursor.execute("SELECT * FROM applications WHERE job_url = ?", (job_url,))
         row = cursor.fetchone()
-        conn.close()
         
         return Application.from_row(row) if row else None
     
@@ -354,7 +356,6 @@ class ApplicationDatabase:
         
         conn.commit()
         success = cursor.rowcount > 0
-        conn.close()
         return success
     
     def get_all_applications(
@@ -382,7 +383,6 @@ class ApplicationDatabase:
             """, (limit, offset))
         
         rows = cursor.fetchall()
-        conn.close()
         
         return [Application.from_row(row) for row in rows]
     
@@ -419,6 +419,18 @@ class ApplicationDatabase:
         conn.close()
         return stats
     
+    def count_applications(self, status: Optional[ApplicationStatus] = None) -> int:
+        """Count applications, optionally filtered by status. Much faster than fetching full objects."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        if status:
+            cursor.execute("SELECT COUNT(*) FROM applications WHERE status = ?", (status.value,))
+        else:
+            cursor.execute("SELECT COUNT(*) FROM applications")
+        
+        return cursor.fetchone()[0]
+    
     def search_applications(self, query: str) -> list[Application]:
         """Search applications by company or role."""
         conn = self._get_connection()
@@ -433,7 +445,6 @@ class ApplicationDatabase:
         """, (search_term, search_term))
         
         rows = cursor.fetchall()
-        conn.close()
         
         return [Application.from_row(row) for row in rows]
     
@@ -445,7 +456,6 @@ class ApplicationDatabase:
         cursor.execute("DELETE FROM applications WHERE id = ?", (application_id,))
         conn.commit()
         success = cursor.rowcount > 0
-        conn.close()
         return success
     
     # ==================== Saved Answers ====================
@@ -469,7 +479,6 @@ class ApplicationDatabase:
         
         conn.commit()
         answer_id = cursor.lastrowid
-        conn.close()
         return answer_id
     
     def find_answer(self, question: str, company: Optional[str] = None) -> Optional[SavedAnswer]:
@@ -487,7 +496,6 @@ class ApplicationDatabase:
             """, (company, question.lower()))
             row = cursor.fetchone()
             if row:
-                conn.close()
                 return SavedAnswer(
                     id=row["id"],
                     question_pattern=row["question_pattern"],
@@ -505,7 +513,6 @@ class ApplicationDatabase:
             LIMIT 1
         """, (question.lower(),))
         row = cursor.fetchone()
-        conn.close()
 
         if row:
             return SavedAnswer(
@@ -553,7 +560,6 @@ class ApplicationDatabase:
                competitors, recent_news, now, now))
 
         conn.commit()
-        conn.close()
 
     def get_company_info(self, name: str) -> Optional[CompanyInfo]:
         """Get cached company info as a CompanyInfo dataclass."""
@@ -562,8 +568,6 @@ class ApplicationDatabase:
 
         cursor.execute("SELECT * FROM companies WHERE name = ?", (name,))
         row = cursor.fetchone()
-        conn.close()
-
         return CompanyInfo.from_row(row) if row else None
 
     # ==================== Job Requirements (Phase 1 cache) ====================
@@ -598,7 +602,6 @@ class ApplicationDatabase:
 
         conn.commit()
         row_id = cursor.lastrowid
-        conn.close()
         return row_id
 
     def get_job_requirements(self, job_id: int) -> Optional[JobRequirement]:
@@ -611,20 +614,22 @@ class ApplicationDatabase:
             (job_id,)
         )
         row = cursor.fetchone()
-        conn.close()
-
         return JobRequirement.from_row(row) if row else None
 
+import threading as _threading
 
 # Singleton instance for easy import
 _db_instance: Optional[ApplicationDatabase] = None
+_db_lock = _threading.Lock()
 
 
 def get_db() -> ApplicationDatabase:
-    """Get the singleton database instance."""
+    """Get the singleton database instance (thread-safe)."""
     global _db_instance
     if _db_instance is None:
-        _db_instance = ApplicationDatabase()
+        with _db_lock:
+            if _db_instance is None:
+                _db_instance = ApplicationDatabase()
     return _db_instance
 
 

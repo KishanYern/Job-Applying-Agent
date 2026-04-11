@@ -27,8 +27,8 @@ OUTPUT ONLY THE LETTER TEXT. DO NOT INCLUDE PREAMBLES, INTRODUCTIONS, OR OUTROS.
 
 ## CANDIDATE NAME RULE (CRITICAL)
 You MUST extract the candidate's actual first name from the CANDIDATE PROFILE provided in the
-user message. Use that real name in the sign-off. NEVER output the literal placeholder text
-"[CANDIDATE_NAME]" — always replace it with the real name from the profile.
+user message. Use that real name in the sign-off. NEVER output a placeholder like
+"[CANDIDATE_NAME]" or "[Your Name]" — always replace it with the real name from the profile.
 
 ## BANNED WORDS/PHRASES - Never use these:
 - "I am writing to express"
@@ -43,7 +43,7 @@ user message. Use that real name in the sign-off. NEVER output the literal place
 - Keep sentences short
 - Be specific about experience, not vague
 
-## EXAMPLE (note: replace [CANDIDATE_NAME] with the real name from the profile):
+## EXAMPLE (using the name "Alex" as a stand-in — YOU must use the real name from the profile):
 
 Dear Acme Team,
 
@@ -54,7 +54,7 @@ At my current job, I rebuilt our payment processing system to handle 5x more tra
 I'd love to chat more about how I could help out. Thanks for considering my application.
 
 Best,
-[CANDIDATE_NAME]
+Alex
 
 ## FORMAT:
 - Start with "Dear [Company] Team,"
@@ -96,13 +96,7 @@ def build_cover_letter_prompt(profile_content: str, job: JobDetails) -> str:
     prompt += """
 ## INSTRUCTIONS
 Write a 3-paragraph cover letter under 300 words.
-
-RULES:
-1. Use contractions (I'm, I've, I'd) - never write "I am" or "I have"
-2. Never say "I am excited", "leverage", "utilize", or "passionate about"
-3. Mention 2 specific things from the profile that match the job
-4. End with "I'd love to chat more" or similar
-
+Mention 2 specific things from the profile that match the job.
 Keep it short and natural."""
 
     return prompt

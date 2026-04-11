@@ -118,10 +118,9 @@ SWE_AI_DS_KEYWORDS = [
 ]
 
 
-RESEARCH_EXTRACTION_PROMPT = """You are extracting structured data from raw web search results and a job description.
-Return ONLY a valid JSON object — no markdown, no explanation, no extra text.
+RESEARCH_EXTRACTION_PROMPT = """Extract structured data from raw web search results and a job description.
 
-Use this exact schema:
+Return a JSON object with this schema:
 {
   "values_mission": "<company mission/values statement, 2-3 sentences>",
   "description_justification": "<pre-written answer to 'Why do you want to work here?', 3-4 sentences using the company's actual values and products>",
@@ -142,8 +141,12 @@ async def _fetch_job_description(url: str, client: httpx.AsyncClient) -> str:
     try:
         response = await client.get(url, follow_redirects=True, timeout=15.0)
         response.raise_for_status()
-        # Strip HTML tags to get readable text
-        text = re.sub(r'<[^>]+>', ' ', response.text)
+        text = response.text
+        # Remove script and style blocks before stripping tags
+        text = re.sub(r'<script[^>]*>.*?</script>', ' ', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<style[^>]*>.*?</style>', ' ', text, flags=re.DOTALL | re.IGNORECASE)
+        # Strip remaining HTML tags
+        text = re.sub(r'<[^>]+>', ' ', text)
         text = re.sub(r'\s+', ' ', text).strip()
         return text[:4000]  # Cap at 4k chars to stay within token budget
     except Exception as e:
@@ -222,7 +225,8 @@ async def research_company(job: "JobListing", http_client: httpx.AsyncClient) ->
             response_format={"type": "json_object"}
         )
         raw_json = response.choices[0].message.content.strip()
-        # Strip any accidental markdown fences
+        # Strip any accidental markdown fences (shouldn't appear with json_object
+        # mode but kept as a safety net)
         raw_json = re.sub(r"^```[a-z]*\n?", "", raw_json)
         raw_json = re.sub(r"\n?```$", "", raw_json)
         return json.loads(raw_json)
@@ -590,14 +594,22 @@ class JobScraper:
 
         print(f"[INFO] Total unique listings after filtering: {len(all_listings)}")
 
-        # Phase 1: run research pipeline sequentially to respect API rate limits
+        # Phase 1: run research pipeline with semaphore-limited concurrency
         if run_research and all_listings:
-            print(f"[INFO] Starting Phase 1 research for {len(all_listings)} listings...")
+            _CONCURRENCY = 5
+            print(f"[INFO] Starting Phase 1 research for {len(all_listings)} listings (up to {_CONCURRENCY} concurrent)...")
+            semaphore = asyncio.Semaphore(_CONCURRENCY)
             researched = 0
-            for listing in all_listings:
-                app_id = await process_discovered_job(listing, profile_content, self.client)
-                if app_id is not None:
-                    researched += 1
+
+            async def _research_one(listing):
+                async with semaphore:
+                    return await process_discovered_job(listing, profile_content, self.client)
+
+            tasks = [asyncio.create_task(_research_one(l)) for l in all_listings]
+            results_phase1 = await asyncio.gather(*tasks, return_exceptions=True)
+            researched = sum(
+                1 for r in results_phase1 if not isinstance(r, Exception) and r is not None
+            )
             print(f"[INFO] Phase 1 complete: {researched} new jobs researched and cached.")
 
         return all_listings

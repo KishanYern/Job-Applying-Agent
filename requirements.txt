@@ -29,10 +29,10 @@ nest-asyncio>=1.5.8
 pypdf>=3.17.0
 
 # PDF Generation (cover letter rendering)
-fpdf2>=2.7.0
+fpdf2>=2.7.5
 
 # Audio alerts for human handoff
-playsound==1.2.2
+playsound>=1.3.0
 
 # Desktop notifications (cross-platform)
 plyer>=2.1.0
@@ -40,5 +40,3 @@ plyer>=2.1.0
 # HTTP Client (for job scraping)
 httpx>=0.25.0
 
-# Utilities
-python-dotenv>=1.0.0

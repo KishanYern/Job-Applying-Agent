@@ -111,24 +111,26 @@ def _play_system_beep(notification_type: NotificationType) -> bool:
     """Play system beep as fallback."""
     try:
         if sys.platform == "linux":
-            # Try different methods for Linux
+            import subprocess
             beep_count = 3 if notification_type == NotificationType.CAPTCHA else 1
-            
-            # Method 1: paplay (PulseAudio)
             for _ in range(beep_count):
-                os.system('paplay /usr/share/sounds/freedesktop/stereo/bell.oga 2>/dev/null || '
-                         'paplay /usr/share/sounds/freedesktop/stereo/complete.oga 2>/dev/null &')
+                subprocess.Popen(
+                    ["paplay", "/usr/share/sounds/freedesktop/stereo/bell.oga"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
             return True
             
         elif sys.platform == "darwin":
-            # macOS: use afplay or say
+            import subprocess
             beep_count = 3 if notification_type == NotificationType.CAPTCHA else 1
             for _ in range(beep_count):
-                os.system('afplay /System/Library/Sounds/Ping.aiff &')
+                subprocess.Popen(
+                    ["afplay", "/System/Library/Sounds/Ping.aiff"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
             return True
             
         elif sys.platform == "win32":
-            # Windows: use winsound
             import winsound
             freq = 1000 if notification_type == NotificationType.CAPTCHA else 800
             duration = 500
@@ -137,8 +139,8 @@ def _play_system_beep(notification_type: NotificationType) -> bool:
                 winsound.Beep(freq, duration)
             return True
             
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] System beep failed: {e}")
     
     return False
 
@@ -188,8 +190,8 @@ def send_desktop_notification(
         
     except ImportError:
         pass
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] plyer notification failed: {e}")
     
     # Fallback: platform-specific methods
     return _send_platform_notification(title, message, notification_type)
@@ -216,9 +218,11 @@ def _send_platform_notification(
             return True
             
         elif sys.platform == "darwin":
-            # macOS: use osascript
+            # macOS: use osascript with properly escaped arguments
             import subprocess
-            script = f'display notification "{message}" with title "{title}"'
+            safe_title = title.replace('\\', '\\\\').replace('"', '\\"')
+            safe_message = message.replace('\\', '\\\\').replace('"', '\\"')
+            script = f'display notification "{safe_message}" with title "{safe_title}"'
             subprocess.run(["osascript", "-e", script], check=False)
             return True
             
@@ -232,8 +236,8 @@ def _send_platform_notification(
             except ImportError:
                 pass
                 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] Platform notification failed: {e}")
     
     return False
 

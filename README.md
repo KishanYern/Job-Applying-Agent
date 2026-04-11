@@ -12,10 +12,10 @@ Runs on your machine as a background task before any applications are submitted.
 - **Model:** Llama-3.3-70B-Instruct via [Groq](https://console.groq.com) serverless API
 - **Search:** [Tavily](https://app.tavily.com) for company intel and salary data
 - **Output:** For each new job, the pipeline caches to SQLite:
-  - Company values, mission, products, recent news, competitors
-  - Tech stack, required skills, salary range
-  - Pre-generated cover letter
-  - Pre-synthesized "Why do you want to work here?" answer
+    - Company values, mission, products, recent news, competitors
+    - Tech stack, required skills, salary range
+    - Pre-generated cover letter
+    - Pre-synthesized "Why do you want to work here?" answer
 
 ### Phase 2 — Autonomous Application (cloud GPU)
 
@@ -33,7 +33,7 @@ Phase 1 (local)                    Phase 2 (cloud GPU)
 job_scraper.py                     apply_agent.py
   │                                  │
   ├─► Tavily search                  ├─► Load profile + DB cache
-  ├─► Groq Llama-3.3-70B            ├─► Build system prompt
+  ├─► Groq Llama-3.3-70B             ├─► Build system prompt
   │     (extract JSON)               ├─► Qwen2.5-Coder-32B (remote)
   └─► SQLite DB ──────────────────►  └─► Playwright browser
         companies                          └─► Fill forms
@@ -45,9 +45,9 @@ job_scraper.py                     apply_agent.py
 
 - Python 3.10+
 - API Keys:
-  - **Groq** — free tier at [console.groq.com](https://console.groq.com)
-  - **Tavily** — free tier at [app.tavily.com](https://app.tavily.com)
-  - **RunPod or Vast.ai** — rent an RTX A6000 (48GB VRAM) or dual RTX 4090 instance running a vLLM server with `qwen2.5-coder-32b-instruct`
+    - **Groq** — free tier at [console.groq.com](https://console.groq.com)
+    - **Tavily** — free tier at [app.tavily.com](https://app.tavily.com)
+    - **RunPod or Vast.ai** — rent an RTX A6000 (48GB VRAM) or dual RTX 4090 instance running a vLLM server with `qwen2.5-coder-32b-instruct`
 
 No local GPU required. No Ollama installation required.
 
@@ -55,38 +55,38 @@ No local GPU required. No Ollama installation required.
 
 1. **Clone the repository**
 
-   ```bash
-   git clone https://github.com/yourusername/job-applying-agent.git
-   cd job-applying-agent
-   ```
+    ```bash
+    git clone https://github.com/yourusername/job-applying-agent.git
+    cd job-applying-agent
+    ```
 
 2. **Install dependencies**
 
-   ```bash
-   pip install -r requirements.txt
-   playwright install
-   ```
+    ```bash
+    pip install -r requirements.txt
+    playwright install
+    ```
 
 3. **Set up your profile**
 
-   Create `my_profile.md` in the project root with your name, contact info, education, work experience, skills, and standard application answers.
+    Create `my_profile.md` in the project root with your name, contact info, education, work experience, skills, and standard application answers.
 
 4. **Add your resume**
 
-   Place your resume PDF in the project root (e.g., `YourName_Resume.pdf`). Update the path in the UI.
+    Place your resume PDF in the project root (e.g., `YourName_Resume.pdf`). Update the path in the UI.
 
 5. **Configure API keys**
 
-   Either set environment variables:
+    Either set environment variables:
 
-   ```bash
-   set GROQ_API_KEY=gsk_...
-   set TAVILY_API_KEY=tvly-...
-   set RUNPOD_ENDPOINT_URL=https://api.runpod.ai/v2/<id>/openai/v1
-   set RUNPOD_API_KEY=...
-   ```
+    ```bash
+    set GROQ_API_KEY=gsk_...
+    set TAVILY_API_KEY=tvly-...
+    set RUNPOD_ENDPOINT_URL=https://api.runpod.ai/v2/<id>/openai/v1
+    set RUNPOD_API_KEY=...
+    ```
 
-   Or enter them directly in the sidebar of the Streamlit UI — they are persisted for the session.
+    Or enter them directly in the sidebar of the Streamlit UI — they are persisted for the session.
 
 ## Usage
 
@@ -102,23 +102,23 @@ streamlit run app.py
 
 ## Cost Model
 
-| Item | Cost |
-|------|------|
-| Phase 1: research 1 company + generate cover letter (~2,500 tokens) | ~$0.0017 |
-| Phase 2: fill 1 application (3 min compute on RTX A6000 @ $0.37-$0.49/hr) | ~$0.019-$0.025 |
-| **Total per application** | **~$0.02-$0.026** |
+| Item                                                                      | Cost              |
+| ------------------------------------------------------------------------- | ----------------- |
+| Phase 1: research 1 company + generate cover letter (~2,500 tokens)       | ~$0.0017          |
+| Phase 2: fill 1 application (3 min compute on RTX A6000 @ $0.37-$0.49/hr) | ~$0.019-$0.025    |
+| **Total per application**                                                 | **~$0.02-$0.026** |
 
 On-the-spot Tavily fallback queries add ~$0.0005 each.
 
 ## File Overview
 
-| File | Role |
-|------|------|
-| `app.py` | Streamlit UI — API key config, discover tab, auto-apply tab |
-| `job_scraper.py` | Phase 1: scrapes GitHub job boards, runs research pipeline |
-| `cover_letter.py` | Phase 1: generates cover letters via Groq |
-| `apply_agent.py` | Phase 2: browser-use agent with pre-loaded data |
+| File                | Role                                                                     |
+| ------------------- | ------------------------------------------------------------------------ |
+| `app.py`            | Streamlit UI — API key config, discover tab, auto-apply tab              |
+| `job_scraper.py`    | Phase 1: scrapes GitHub job boards, runs research pipeline               |
+| `cover_letter.py`   | Phase 1: generates cover letters via Groq                                |
+| `apply_agent.py`    | Phase 2: browser-use agent with pre-loaded data                          |
 | `application_db.py` | SQLite schema — applications, companies, job_requirements, saved_answers |
-| `agent_state.py` | Session persistence and crash recovery |
-| `notifications.py` | Desktop alerts for CAPTCHA, errors, daily summaries |
-| `my_profile.md` | Your profile (not committed — add manually) |
+| `agent_state.py`    | Session persistence and crash recovery                                   |
+| `notifications.py`  | Desktop alerts for CAPTCHA, errors, daily summaries                      |
+| `my_profile.md`     | Your profile (not committed — add manually)                              |

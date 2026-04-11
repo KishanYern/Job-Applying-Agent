@@ -4,8 +4,10 @@ Handles browser crashes, network failures, and interrupted sessions.
 """
 
 import json
+import hashlib
 import os
 import time
+import threading
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
@@ -144,7 +146,7 @@ class AgentState:
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentState":
-        """Create from dictionary."""
+        """Create from dictionary, ignoring unknown keys for forward compatibility."""
         # Convert phase back to enum
         if "phase" in data and isinstance(data["phase"], str):
             data["phase"] = AgentPhase(data["phase"])
@@ -155,7 +157,11 @@ class AgentState:
                 k: FormFieldState(**v) for k, v in data["fields_filled"].items()
             }
         
-        return cls(**data)
+        # Filter to only known dataclass fields (forward compatibility)
+        known_fields = {f.name for f in __import__('dataclasses').fields(cls)}
+        filtered_data = {k: v for k, v in data.items() if k in known_fields}
+        
+        return cls(**filtered_data)
     
     def get_progress_percent(self) -> float:
         """Get completion percentage."""
@@ -215,7 +221,8 @@ class StateManager:
         """
         # Generate session ID
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        session_id = f"session_{timestamp}_{hash(job_url) % 10000:04d}"
+        url_hash = hashlib.md5(job_url.encode()).hexdigest()[:8]
+        session_id = f"session_{timestamp}_{url_hash}"
         
         state = AgentState(
             session_id=session_id,
@@ -261,7 +268,7 @@ class StateManager:
             return True
             
         except Exception as e:
-            print(f"Failed to save state: {e}")
+            print(f"[WARN] Failed to save state: {e}")
             return False
     
     def auto_save(self, state: Optional[AgentState] = None) -> bool:
@@ -293,7 +300,7 @@ class StateManager:
             return state
             
         except Exception as e:
-            print(f"Failed to load state: {e}")
+            print(f"[WARN] Failed to load state: {e}")
             return None
     
     def get_active_session(self) -> Optional[AgentState]:
@@ -321,7 +328,8 @@ class StateManager:
             
             return None
             
-        except Exception:
+        except Exception as e:
+            print(f"[WARN] Failed to get active session: {e}")
             return None
     
     def get_recoverable_sessions(self, max_age_hours: int = 24) -> List[AgentState]:
@@ -353,14 +361,16 @@ class StateManager:
                     if state.phase not in [AgentPhase.COMPLETED, AgentPhase.FAILED]:
                         recoverable.append(state)
                         
-                except Exception:
+                except Exception as e:
+                    print(f"[WARN] Skipping corrupt state file {state_file.name}: {e}")
                     continue
             
             # Sort by most recent first
             recoverable.sort(key=lambda s: s.updated_at, reverse=True)
             return recoverable
             
-        except Exception:
+        except Exception as e:
+            print(f"[WARN] Error listing recoverable sessions: {e}")
             return []
     
     def mark_completed(self, state: Optional[AgentState] = None) -> None:
@@ -391,8 +401,8 @@ class StateManager:
             active_file = self._get_active_state_file()
             if active_file.exists():
                 active_file.unlink()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Failed to clear active session marker: {e}")
     
     def cleanup_old_sessions(self, max_age_days: int = 7) -> int:
         """
@@ -412,8 +422,8 @@ class StateManager:
                 if state_file.stat().st_mtime < cutoff:
                     state_file.unlink()
                     deleted += 1
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Error during session cleanup: {e}")
         
         return deleted
     
@@ -428,15 +438,18 @@ class StateManager:
         self._current_state = state
 
 
-# Singleton instance
+# Singleton instance with thread-safe initialization
 _state_manager: Optional[StateManager] = None
+_state_manager_lock = threading.Lock()
 
 
 def get_state_manager() -> StateManager:
-    """Get the singleton state manager instance."""
+    """Get the singleton state manager instance (thread-safe)."""
     global _state_manager
     if _state_manager is None:
-        _state_manager = StateManager()
+        with _state_manager_lock:
+            if _state_manager is None:
+                _state_manager = StateManager()
     return _state_manager
 
 

@@ -165,7 +165,13 @@ def add_log(message: str, level: str = "info"):
 
 
 def _sync_api_keys_to_env():
-    """Push API keys from session state into environment variables for sub-modules."""
+    """Push API keys from session state into environment variables for sub-modules.
+    
+    Trade-off: storing keys in os.environ makes them accessible to any code
+    running in this process. This is necessary because sub-modules (langchain,
+    groq, tavily) read keys from os.environ. If you're concerned about
+    dependency supply-chain attacks, audit requirements.txt carefully.
+    """
     if st.session_state.get("groq_api_key"):
         os.environ["GROQ_API_KEY"] = st.session_state.groq_api_key
     if st.session_state.get("tavily_api_key"):
@@ -569,7 +575,6 @@ def render_discover_tab():
         st.subheader(f"📋 Job Listings ({len(jobs)})")
         
         for i, job in enumerate(jobs[:50]):  # Show first 50
-            db = get_db()
             is_duplicate = db.is_duplicate(job.apply_url)
             
             with st.expander(
@@ -615,10 +620,10 @@ def render_auto_apply_tab():
     with col1:
         st.metric("📋 In Queue", len(queued_jobs))
     with col2:
-        completed = len(db.get_all_applications(status=ApplicationStatus.COMPLETED, limit=1000))
+        completed = db.count_applications(status=ApplicationStatus.COMPLETED)
         st.metric("✅ Completed", completed)
     with col3:
-        failed = len(db.get_all_applications(status=ApplicationStatus.FAILED, limit=1000))
+        failed = db.count_applications(status=ApplicationStatus.FAILED)
         st.metric("❌ Failed", failed)
 
     st.markdown("---")
@@ -1094,7 +1099,7 @@ def main():
     st.markdown("---")
     st.markdown("""
     <div style="text-align: center; color: #9CA3AF; font-size: 0.875rem;">
-        🔒 Personal data stays local • Phase 1: Groq Llama-3.3-70B • Phase 2: Qwen2.5-Coder-32B on cloud GPU
+        🔒 Data stored locally • Phase 1: Groq Llama-3.3-70B (no PII sent) • Phase 2: Qwen2.5-Coder-32B on your cloud GPU (profile sent for form-filling)
     </div>
     """, unsafe_allow_html=True)
 
