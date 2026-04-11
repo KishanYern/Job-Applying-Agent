@@ -28,6 +28,9 @@ nest-asyncio>=1.5.8
 # PDF Processing (optional - for resume parsing)
 pypdf>=3.17.0
 
+# PDF Generation (cover letter rendering)
+fpdf2>=2.7.0
+
 # Audio alerts for human handoff
 playsound==1.2.2
 

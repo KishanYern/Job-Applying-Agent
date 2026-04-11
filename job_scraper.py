@@ -287,6 +287,7 @@ async def process_discovered_job(
 
     # Step 5: generate cover letter
     cover_letter_text = ""
+    cover_letter_pdf_path = None
     if profile_content:
         try:
             job_details = JobDetails(
@@ -302,6 +303,19 @@ async def process_discovered_job(
         except Exception as e:
             print(f"[WARN] Cover letter generation failed for {job.company}: {e}")
 
+    # Step 5b: render cover letter to PDF for file-upload fields
+    if cover_letter_text:
+        try:
+            from cover_letter import save_cover_letter_pdf
+            cover_letter_pdf_path = save_cover_letter_pdf(
+                text=cover_letter_text,
+                company=job.company,
+                role=job.role,
+            )
+            print(f"[INFO] Cover letter PDF saved: {cover_letter_pdf_path}")
+        except Exception as e:
+            print(f"[WARN] Cover letter PDF generation failed for {job.company}: {e}")
+
     # Step 6: save job requirements
     db.save_job_requirements(
         job_id=job_id,
@@ -309,6 +323,7 @@ async def process_discovered_job(
         skills_required=data.get("skills_required"),
         salary_range=data.get("salary_range"),
         cover_letter_text=cover_letter_text or None,
+        cover_letter_pdf_path=cover_letter_pdf_path,
     )
 
     # Step 7: cache "why here" answer

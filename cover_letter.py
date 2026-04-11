@@ -4,6 +4,8 @@ Phase 1 pre-generates all cover letters during discovery so Phase 2 never writes
 """
 
 import os
+import re
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 from langchain_groq import ChatGroq
@@ -23,6 +25,11 @@ class JobDetails:
 COVER_LETTER_SYSTEM_PROMPT = """Write a short cover letter (under 300 words, 3 paragraphs).
 OUTPUT ONLY THE LETTER TEXT. DO NOT INCLUDE PREAMBLES, INTRODUCTIONS, OR OUTROS.
 
+## CANDIDATE NAME RULE (CRITICAL)
+You MUST extract the candidate's actual first name from the CANDIDATE PROFILE provided in the
+user message. Use that real name in the sign-off. NEVER output the literal placeholder text
+"[CANDIDATE_NAME]" — always replace it with the real name from the profile.
+
 ## BANNED WORDS/PHRASES - Never use these:
 - "I am writing to express"
 - "I am excited" or "I am thrilled"  
@@ -36,7 +43,7 @@ OUTPUT ONLY THE LETTER TEXT. DO NOT INCLUDE PREAMBLES, INTRODUCTIONS, OR OUTROS.
 - Keep sentences short
 - Be specific about experience, not vague
 
-## EXAMPLE:
+## EXAMPLE (note: replace [CANDIDATE_NAME] with the real name from the profile):
 
 Dear Acme Team,
 
@@ -47,11 +54,11 @@ At my current job, I rebuilt our payment processing system to handle 5x more tra
 I'd love to chat more about how I could help out. Thanks for considering my application.
 
 Best,
-Kishan
+[CANDIDATE_NAME]
 
 ## FORMAT:
-- Start with "Dear [Company] Team," 
-- End with "Best," and the candidate's name
+- Start with "Dear [Company] Team,"
+- End with "Best," followed by the candidate's first name extracted from the CANDIDATE PROFILE
 - No addresses or dates
 - Use real info from the profile only"""
 
@@ -149,6 +156,49 @@ def generate_cover_letter_sync(
 
     response = llm.invoke(messages)
     return response.content.strip()
+
+
+def save_cover_letter_pdf(text: str, company: str, role: str) -> str:
+    """
+    Render cover letter text into a PDF and save it to data/cover_letters/.
+
+    Args:
+        text: The cover letter plain text.
+        company: Company name (used in the filename).
+        role: Role title (used in the filename).
+
+    Returns:
+        Absolute file path to the generated PDF.
+    """
+    from fpdf import FPDF
+
+    # Sanitize company and role for safe filenames
+    safe_company = re.sub(r'[^\w\-]', '_', company).strip('_')[:40]
+    safe_role = re.sub(r'[^\w\-]', '_', role).strip('_')[:40]
+    filename = f"CoverLetter_{safe_company}_{safe_role}.pdf"
+
+    output_dir = Path(__file__).parent / "data" / "cover_letters"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / filename
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=25)
+    pdf.set_left_margin(25)
+    pdf.set_right_margin(25)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=11)
+
+    # Write each line; blank lines get extra vertical space.
+    # new_x="LMARGIN" resets the cursor to the left margin after each cell,
+    # preventing 'not enough horizontal space' on consecutive non-blank lines.
+    for line in text.split("\n"):
+        if line.strip() == "":
+            pdf.ln(6)
+        else:
+            pdf.multi_cell(w=0, h=6, text=line, new_x="LMARGIN", new_y="NEXT")
+
+    pdf.output(str(output_path))
+    return str(output_path.resolve())
 
 
 # For standalone testing

@@ -110,10 +110,12 @@ class JobRequirement:
     skills_required: Optional[str]
     salary_range: Optional[str]
     cover_letter_text: Optional[str]
+    cover_letter_pdf_path: Optional[str]
     created_at: str
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "JobRequirement":
+        keys = row.keys()
         return cls(
             id=row["id"],
             job_id=row["job_id"],
@@ -121,6 +123,7 @@ class JobRequirement:
             skills_required=row["skills_required"],
             salary_range=row["salary_range"],
             cover_letter_text=row["cover_letter_text"],
+            cover_letter_pdf_path=row["cover_letter_pdf_path"] if "cover_letter_pdf_path" in keys else None,
             created_at=row["created_at"],
         )
 
@@ -248,6 +251,12 @@ class ApplicationDatabase:
             CREATE INDEX IF NOT EXISTS idx_job_requirements_job_id
             ON job_requirements(job_id)
         """)
+
+        # Migrate existing job_requirements table to add cover_letter_pdf_path
+        try:
+            cursor.execute("ALTER TABLE job_requirements ADD COLUMN cover_letter_pdf_path TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
         conn.commit()
         conn.close()
@@ -566,6 +575,7 @@ class ApplicationDatabase:
         skills_required: Optional[str] = None,
         salary_range: Optional[str] = None,
         cover_letter_text: Optional[str] = None,
+        cover_letter_pdf_path: Optional[str] = None,
     ) -> int:
         """
         Save Phase 1 extracted job requirements linked to an application ID.
@@ -580,9 +590,11 @@ class ApplicationDatabase:
 
         cursor.execute("""
             INSERT INTO job_requirements
-                (job_id, tech_stack, skills_required, salary_range, cover_letter_text, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (job_id, tech_stack, skills_required, salary_range, cover_letter_text, now))
+                (job_id, tech_stack, skills_required, salary_range, cover_letter_text,
+                 cover_letter_pdf_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (job_id, tech_stack, skills_required, salary_range, cover_letter_text,
+              cover_letter_pdf_path, now))
 
         conn.commit()
         row_id = cursor.lastrowid

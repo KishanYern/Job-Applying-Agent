@@ -142,12 +142,19 @@ def build_system_prompt(
     skills_required = (job_reqs.skills_required if job_reqs else None) or "Not available"
     salary_range = (job_reqs.salary_range if job_reqs else None) or "Not available"
     cover_letter = (job_reqs.cover_letter_text if job_reqs else None) or ""
+    cover_letter_pdf_path = (job_reqs.cover_letter_pdf_path if job_reqs else None) or ""
     why_here = (why_here_answer.answer if why_here_answer else None) or "Not available"
 
     cover_letter_section = (
         f"## PRE-GENERATED COVER LETTER\n{cover_letter}"
         if cover_letter
         else "## PRE-GENERATED COVER LETTER\nNot available — write one using the profile and company data above."
+    )
+
+    cover_letter_pdf_section = (
+        f"## COVER LETTER PDF FILE\n{cover_letter_pdf_path}"
+        if cover_letter_pdf_path
+        else "## COVER LETTER PDF FILE\nNot available"
     )
 
     candidate_name = (
@@ -177,6 +184,8 @@ def build_system_prompt(
 
 {cover_letter_section}
 
+{cover_letter_pdf_section}
+
 ## FORM FILLING RULES
 1. **Match fields carefully**: Map form labels (e.g., "First Name", "Email", "Phone") to the candidate profile.
 2. **Be precise**: Use exact values from the profile. Do not paraphrase names, emails, or phone numbers.
@@ -185,8 +194,9 @@ def build_system_prompt(
 5. **Salary fields**: Use the pre-researched Salary Range above. If it is "Not available", use the search_missing_info tool.
 6. **"Why here" fields**: Use the pre-synthesized answer above verbatim or lightly adapted.
 7. **Cover letter text fields**: Paste the Pre-Generated Cover Letter above. If it is not available, write one from the profile and company data.
-8. **Cover letter file uploads**: Alert the user — a separate cover letter file is needed.
+8. **Cover letter file uploads**: If a cover letter file upload field is detected, upload the PDF file listed in the COVER LETTER PDF FILE section above. If that path is "Not available", alert the user that a cover letter file is needed.
 9. **DO NOT open new browser tabs** for any reason. Use the search_missing_info tool for any missing data.
+10. **Unforeseen short-answer or essay questions**: If any form field asks a behavioral, technical, or subjective question not covered above (e.g., "Tell us about a challenging project", "Describe a complex problem you solved"), compose a concise, professional answer (2-4 sentences) using ONLY facts, experiences, and skills explicitly stated in the CANDIDATE PROFILE section above. Never invent experiences, metrics, or projects not present in the profile. If the profile contains no relevant information for the question, enter: "Please see my attached resume for details."
 
 ## CRITICAL SAFETY RULES
 1. **NEVER submit** the application without explicit user confirmation.
@@ -396,7 +406,8 @@ EXECUTION STEPS:
    - For salary fields: use the pre-researched Salary Range. If "Not available", call search_missing_info.
    - For "Why do you want to work here?": use the PRE-SYNTHESIZED ANSWER from the system prompt.
    - For cover letter text fields: paste the PRE-GENERATED COVER LETTER from the system prompt.
-   - For cover letter file uploads: alert the user that a cover letter file is needed.
+   - For cover letter file uploads: upload the PDF file specified in the COVER LETTER PDF FILE section of the system prompt. If the path is "Not available", alert the user.
+   - For any unforeseen behavioral, technical, or subjective questions: compose a short answer (2-4 sentences) using ONLY facts from the CANDIDATE PROFILE. Never invent information. If nothing relevant is in the profile, write: "Please see my attached resume for details."
    - DO NOT open new browser tabs for any reason.
 4. **Review:** Click "Next" until you reach the "Review" or "Final Submit" page.
 5. **HALT:** Stop immediately upon reaching the final page. Notify the user: "Application ready for review."
