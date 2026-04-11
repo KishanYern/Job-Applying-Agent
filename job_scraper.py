@@ -102,6 +102,13 @@ DEFAULT_REPOS: list[RepoConfig] = [
         branch="dev",
         job_type="internship"
     ),
+    # Jobright-AI - New Grad (2026)
+    RepoConfig(
+        owner="jobright-ai",
+        repo="2026-Software-Engineer-New-Grad",
+        branch="main",
+        job_type="new-grad"
+    ),
 ]
 
 # Keywords for filtering relevant roles (Software Engineering, AI, Data Science)
