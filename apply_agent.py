@@ -12,7 +12,7 @@ import asyncio
 import os
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Any
 from dataclasses import dataclass
 
 # Browser automation
@@ -127,53 +127,46 @@ def _extract_candidate_name(profile_content: str) -> str:
 
 def build_system_prompt(
     profile_content: str,
-    company: str = "the company",
-    role: str = "the position",
-    job_id: Optional[int] = None,
+    company_name: str,
+    company_info: Optional[Any] = None,
+    job_reqs: Optional[Any] = None,
+    why_here_answer: Optional[str] = None,
 ) -> str:
     """
     Build the Phase 2 system prompt with all pre-researched data injected.
-    Queries the SQLite DB for cached company info, job requirements, and answers.
-
-    Only includes fields that have actual data — omits 'Not available' fields
-    to minimize token usage and give the model more reasoning room.
     """
-    db = get_db()
-    company_info = db.get_company_info(company) if company != "the company" else None
-    job_reqs = db.get_job_requirements(job_id) if job_id else None
-    why_here_answer = db.find_answer("why do you want to work here", company)
-
-    # Extract pre-researched fields — only include lines with real data
+    # Extract pre-researched fields
     company_data_lines = []
-    for label, value in [
-        ("Values / Mission", company_info.values_summary if company_info else None),
-        ("About / Products", company_info.about_summary if company_info else None),
-        ("Competitors", company_info.competitors if company_info else None),
-        ("Recent News", company_info.recent_news if company_info else None),
-    ]:
-        if value:
-            company_data_lines.append(f"- **{label}:** {value}")
+    if company_info:
+        for label, value in [
+            ("Company Mission", company_info.values_summary),
+            ("About", company_info.about_summary),
+            ("Recent News", company_info.recent_news),
+        ]:
+            if value:
+                company_data_lines.append(f"- **{label}:** {value}")
 
     company_section = (
         "\n".join(company_data_lines) if company_data_lines
-        else "No pre-researched company data available. Use the search_missing_info tool if needed."
+        else "No pre-researched company data available."
     )
 
     job_req_lines = []
-    for label, value in [
-        ("Tech Stack", job_reqs.tech_stack if job_reqs else None),
-        ("Skills Required", job_reqs.skills_required if job_reqs else None),
-        ("Salary Range", job_reqs.salary_range if job_reqs else None),
-    ]:
-        if value:
-            job_req_lines.append(f"- **{label}:** {value}")
+    if job_reqs:
+        for label, value in [
+            ("Role Description", job_reqs.tech_stack),
+            ("Skills Required", job_reqs.skills_required),
+            ("Salary Range", job_reqs.salary_range),
+        ]:
+            if value:
+                job_req_lines.append(f"- **{label}:** {value}")
 
     job_section = (
         "\n".join(job_req_lines) if job_req_lines
-        else "No pre-extracted job requirements available. Use the search_missing_info tool if needed."
+        else "No pre-extracted job requirements available."
     )
 
-    why_here = (why_here_answer.answer if why_here_answer else None) or ""
+    why_here = why_here_answer or ""
     cover_letter = (job_reqs.cover_letter_text if job_reqs else None) or ""
     cover_letter_pdf_path = (job_reqs.cover_letter_pdf_path if job_reqs else None) or ""
 
@@ -181,7 +174,7 @@ def build_system_prompt(
     from pathlib import Path as _Path
     cover_letter_pdf_display = _Path(cover_letter_pdf_path).name if cover_letter_pdf_path else ""
 
-    # Build optional sections — only include if data exists
+    # Build optional sections
     optional_sections = []
 
     if why_here:
@@ -216,7 +209,7 @@ def build_system_prompt(
 6. For cover letter text fields, paste the Pre-Generated Cover Letter. If unavailable, write one from the profile and company data.
 7. For cover letter file uploads, upload the PDF listed above. If unavailable, alert the user.
 8. DO NOT open new browser tabs. Use search_missing_info for missing data.
-9. For unforeseen behavioral/subjective questions, compose a 2-4 sentence answer using ONLY facts from the CANDIDATE PROFILE. Never invent information. If nothing relevant exists, write: "Please see my attached resume for details."
+9. For unforeseen behavioral or subjective questions, you MUST construct your response using only facts from the CANDIDATE PROFILE and the pre-researched context provided above (company mission, role description, recent news, etc.). Never invent information.
 
 ## SAFETY RULES
 - NEVER submit the application without user confirmation.
@@ -247,6 +240,8 @@ def _init_llm() -> ChatOpenAI:
         api_key=api_key,
         temperature=0.1,
         max_tokens=8192,
+        max_retries=10,
+        timeout=800,
     )
 
 
@@ -355,12 +350,20 @@ async def run_agent(
         profile_content = load_profile(profile_path)
         log(f"Profile loaded ({len(profile_content)} characters)", "success")
 
+        # Retrieve company info and job requirements from ApplicationDB
+        company_name_query = company or "the company"
+        company_info = db.get_company_info(company_name_query) if company_name_query != "the company" else None
+        job_reqs = db.get_job_requirements(application_id) if application_id else None
+        why_here_db = db.find_answer("why do you want to work here", company_name_query)
+        why_here_answer = why_here_db.answer if why_here_db else None
+
         # Build system prompt with all pre-researched data
         system_prompt = build_system_prompt(
             profile_content,
-            company=company or "the company",
-            role=role or "the position",
-            job_id=application_id,
+            company_name=company_name_query,
+            company_info=company_info,
+            job_reqs=job_reqs,
+            why_here_answer=why_here_answer,
         )
 
         # Initialize LLM with retry
@@ -442,8 +445,8 @@ EXECUTION STEPS:
                     llm=llm,  # type: ignore[arg-type]
                     extend_system_message=system_prompt,
                     include_attributes=[
-                        "id", "title", "type", "name", "role", "aria-label",
-                        "placeholder", "value", "alt", "for", "href",
+                        "title", "type", "name", "role", "id", "aria-label",
+                        "placeholder", "value",
                     ],
                     browser_context_kwargs={"headless": False},
                 )
