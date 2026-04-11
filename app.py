@@ -654,24 +654,42 @@ def render_auto_apply_tab():
                     st.error("Groq and Tavily API keys must be configured in the sidebar.")
                 else:
                     import httpx as _httpx
-                    from job_scraper import process_discovered_job
+                    import threading as _threading
+                    from job_scraper import process_discovered_job, JobListing as _JobListing
                     progress = st.progress(0)
-                    researched = 0
                     total = len(jobs_missing_research)
-                    with st.spinner(f"Running Phase 1 research for {total} jobs..."):
+                    # Semaphore limits concurrent Groq + Tavily API calls:
+                    # 5 jobs × 3 calls each = up to 15 simultaneous requests,
+                    # safely within free-tier rate limits for both services.
+                    _CONCURRENCY = 5
+                    with st.spinner(f"Running Phase 1 research for {total} jobs (up to {_CONCURRENCY} concurrent)..."):
                         async def _run_research():
-                            async with _httpx.AsyncClient(timeout=30.0) as client:
-                                for i, job_app in enumerate(jobs_missing_research):
-                                    from job_scraper import JobListing
-                                    listing = JobListing(
-                                        company=job_app.company,
-                                        role=job_app.role,
-                                        location=job_app.location or "",
-                                        apply_url=job_app.job_url,
-                                        source_repo=job_app.source or "",
-                                    )
+                            semaphore = asyncio.Semaphore(_CONCURRENCY)
+                            completed = 0
+                            lock = _threading.Lock()
+
+                            async def _research_one(job_app):
+                                nonlocal completed
+                                listing = _JobListing(
+                                    company=job_app.company,
+                                    role=job_app.role,
+                                    location=job_app.location or "",
+                                    apply_url=job_app.job_url,
+                                    source_repo=job_app.source or "",
+                                )
+                                async with semaphore:
                                     await process_discovered_job(listing, profile_content, client)
-                                    progress.progress((i + 1) / total)
+                                with lock:
+                                    completed += 1
+                                    progress.progress(completed / total)
+
+                            async with _httpx.AsyncClient(timeout=30.0) as client:
+                                tasks = [
+                                    asyncio.create_task(_research_one(job_app))
+                                    for job_app in jobs_missing_research
+                                ]
+                                await asyncio.gather(*tasks, return_exceptions=True)
+
                         asyncio.run(_run_research())
                     st.success(f"Phase 1 research complete for {total} jobs!")
                     st.rerun()

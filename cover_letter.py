@@ -21,6 +21,7 @@ class JobDetails:
 
 
 COVER_LETTER_SYSTEM_PROMPT = """Write a short cover letter (under 300 words, 3 paragraphs).
+OUTPUT ONLY THE LETTER TEXT. DO NOT INCLUDE PREAMBLES, INTRODUCTIONS, OR OUTROS.
 
 ## BANNED WORDS/PHRASES - Never use these:
 - "I am writing to express"
@@ -46,7 +47,7 @@ At my current job, I rebuilt our payment processing system to handle 5x more tra
 I'd love to chat more about how I could help out. Thanks for considering my application.
 
 Best,
-John
+Kishan
 
 ## FORMAT:
 - Start with "Dear [Company] Team," 
