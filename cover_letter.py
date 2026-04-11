@@ -191,11 +191,15 @@ def save_cover_letter_pdf(text: str, company: str, role: str) -> str:
     # Write each line; blank lines get extra vertical space.
     # new_x="LMARGIN" resets the cursor to the left margin after each cell,
     # preventing 'not enough horizontal space' on consecutive non-blank lines.
+    # Lines are sanitized to Latin-1 because fpdf's default encoding cannot
+    # handle Unicode characters (smart quotes, curly apostrophes, em-dashes)
+    # that Llama 3 frequently outputs despite negative prompting.
     for line in text.split("\n"):
         if line.strip() == "":
             pdf.ln(6)
         else:
-            pdf.multi_cell(w=0, h=6, text=line, new_x="LMARGIN", new_y="NEXT")
+            safe_line = line.encode("latin-1", "replace").decode("latin-1")
+            pdf.multi_cell(w=0, h=6, text=safe_line, new_x="LMARGIN", new_y="NEXT")
 
     pdf.output(str(output_path))
     return str(output_path.resolve())

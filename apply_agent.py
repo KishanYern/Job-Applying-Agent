@@ -430,7 +430,7 @@ CRITICAL RULES:
                     llm=llm,  # type: ignore[arg-type]
                     extend_system_message=system_prompt,
                     include_attributes=[
-                        "title", "type", "name", "role", "aria-label",
+                        "id", "title", "type", "name", "role", "aria-label",
                         "placeholder", "value", "alt", "for", "href",
                     ],
                     browser_context_kwargs={"headless": False},
