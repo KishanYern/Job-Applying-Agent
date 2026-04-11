@@ -2,6 +2,7 @@
 my_profile.md
 data/
 *.pdf
+.env
 
 # Python
 __pycache__/
