@@ -18,6 +18,11 @@ from dataclasses import dataclass
 # Browser automation
 from browser_use import Agent
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.outputs import ChatResult
+from langchain_core.messages.tool import ToolCall
+import json
+import copy
 
 # Local database for tracking applications
 from application_db import get_db, ApplicationStatus
@@ -220,13 +225,167 @@ You are applying as: {candidate_name}
 """
 
 
-def _init_llm() -> ChatOpenAI:
+class SafeVLLMChatOpenAI(ChatOpenAI):
     """
-    Initialize the ChatOpenAI client pointed at the remote cloud GPU vLLM endpoint.
+    Bypasses LangChain's OpenAI HTTP client entirely to avoid RunPod/vLLM 2.14.0
+    crashing on extra OpenAI-native fields (logprobs, n, frequency_penalty, etc.)
+    that LangChain silently injects. Instead we fire a raw requests/httpx call
+    with only the minimal payload that the scratch test proved works:
+    {model, messages, max_tokens, temperature}. Tools are injected into the
+    system prompt as XML text; <tool_call> blocks in responses are parsed back
+    into standard LangChain ToolCall objects.
+    """
+
+    # ------------------------------------------------------------------ #
+    #  Helpers                                                             #
+    # ------------------------------------------------------------------ #
+
+    def _build_raw_messages(self, messages, tools=None):
+        def to_dict(msg):
+            from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+            if isinstance(msg, SystemMessage):
+                return {"role": "system", "content": msg.content}
+            elif isinstance(msg, HumanMessage):
+                return {"role": "user", "content": msg.content}
+            elif isinstance(msg, AIMessage):
+                content = msg.content or ""
+                if msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        content += f'\n<tool_call>\n{{"name": "{tc["name"]}", "arguments": {json.dumps(tc["args"])}}}\n</tool_call>\n'
+                return {"role": "assistant", "content": content.strip()}
+            elif isinstance(msg, ToolMessage):
+                return {"role": "user", "content": f"<tool_response>\nName: {msg.name}\nContent: {msg.content}\n</tool_response>"}
+            else:
+                return {"role": "user", "content": str(msg.content)}
+
+        raw = [to_dict(m) for m in messages]
+
+        if tools:
+            instr = (
+                "\n\nYou are a helpful assistant with tool calling capabilities. "
+                "You must use the provided tools if needed.\n"
+                "<tools>\n" + json.dumps(tools, indent=2) + "\n</tools>\n"
+                'If you want to use a tool, output EXACTLY:\n'
+                "<tool_call>\n"
+                '{"name": "<tool_name>", "arguments": <json_args>}\n'
+                "</tool_call>\n"
+            )
+            if raw and raw[0]["role"] == "system":
+                raw[0]["content"] += instr
+            else:
+                raw.insert(0, {"role": "system", "content": instr})
+        return raw
+
+    @staticmethod
+    def _parse_tool_calls(text):
+        import re
+        parsed = []
+        blocks = list(re.finditer(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", text, re.DOTALL))
+        for i, m in enumerate(reversed(blocks)):
+            try:
+                blob = json.loads(m.group(1))
+                args = blob.get("arguments", {})
+                if isinstance(args, str):
+                    args = json.loads(args)
+                parsed.insert(0, ToolCall(
+                    name=blob["name"], args=args,
+                    id=f"call_{int(time.time()*1000)}_{i}",
+                ))
+                text = text[:m.start()] + text[m.end():]
+            except Exception as exc:
+                print(f"[WARN] SafeVLLM: failed to parse tool call: {exc}")
+        return text.strip(), parsed
+
+    def _build_payload(self, raw_messages, stop):
+        payload = {
+            "model": self.model_name,
+            "messages": raw_messages,
+            "max_tokens": self.max_tokens or 8192,
+            "temperature": self.temperature,
+        }
+        if stop:
+            payload["stop"] = stop
+        return payload
+
+    def _headers(self):
+        key = (self.openai_api_key.get_secret_value()
+               if hasattr(self.openai_api_key, "get_secret_value")
+               else str(self.openai_api_key))
+        return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+    @property
+    def _chat_url(self):
+        base = str(self.openai_api_base or "").rstrip("/")
+        return base if base.endswith("/chat/completions") else base + "/chat/completions"
+
+    @staticmethod
+    def _to_chat_result(data):
+        from langchain_core.outputs import ChatGeneration
+        choice = data["choices"][0]
+        content = choice["message"].get("content") or ""
+        finish = choice.get("finish_reason", "stop")
+        ai_msg = AIMessage(content=content)
+        gen = ChatGeneration(message=ai_msg, generation_info={"finish_reason": finish})
+        return ChatResult(
+            generations=[gen],
+            llm_output={"token_usage": data.get("usage", {}), "model_name": data.get("model", "")},
+        )
+
+    # ------------------------------------------------------------------ #
+    #  Sync                                                                #
+    # ------------------------------------------------------------------ #
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        import requests as _req
+        tools = kwargs.pop("tools", None)
+        kwargs.pop("tool_choice", None)
+        kwargs.pop("parallel_tool_calls", None)
+
+        payload = self._build_payload(self._build_raw_messages(messages, tools), stop)
+        timeout = getattr(self, "request_timeout", None) or getattr(self, "timeout", 800)
+
+        resp = _req.post(self._chat_url, headers=self._headers(), json=payload, timeout=timeout)
+        if resp.status_code != 200:
+            raise Exception(f"Error code: {resp.status_code} - {resp.json()}")
+
+        result = self._to_chat_result(resp.json())
+        if tools and result.generations:
+            ai = result.generations[0].message
+            ai.content, ai.tool_calls = self._parse_tool_calls(ai.content or "")
+        return result
+
+    # ------------------------------------------------------------------ #
+    #  Async                                                               #
+    # ------------------------------------------------------------------ #
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        import httpx
+        tools = kwargs.pop("tools", None)
+        kwargs.pop("tool_choice", None)
+        kwargs.pop("parallel_tool_calls", None)
+
+        payload = self._build_payload(self._build_raw_messages(messages, tools), stop)
+        timeout = float(getattr(self, "request_timeout", None) or getattr(self, "timeout", 800))
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(self._chat_url, headers=self._headers(), json=payload)
+        if resp.status_code != 200:
+            raise Exception(f"Error code: {resp.status_code} - {resp.json()}")
+
+        result = self._to_chat_result(resp.json())
+        if tools and result.generations:
+            ai = result.generations[0].message
+            ai.content, ai.tool_calls = self._parse_tool_calls(ai.content or "")
+        return result
+
+def _init_llm(model_name: Optional[str] = None) -> SafeVLLMChatOpenAI:
+    """
+    Initialize the SafeVLLMChatOpenAI client pointed at the remote cloud GPU vLLM endpoint.
     Reads RUNPOD_ENDPOINT_URL and RUNPOD_API_KEY from environment variables.
     """
     endpoint_url = os.environ.get("RUNPOD_ENDPOINT_URL", "")
     api_key = os.environ.get("RUNPOD_API_KEY", "")
+    model_name = model_name or os.environ.get("RUNPOD_MODEL_NAME", "casperhansen/llama-3.3-70b-instruct-awq")
 
     if not endpoint_url or not api_key:
         raise ConnectionError(
@@ -234,12 +393,12 @@ def _init_llm() -> ChatOpenAI:
             "Configure them in the UI or set them as environment variables."
         )
 
-    return ChatOpenAI(
-        model="qwen2.5-coder-32b-instruct",
+    return SafeVLLMChatOpenAI(
+        model=model_name,
         base_url=endpoint_url,
         api_key=api_key,
         temperature=0.1,
-        max_tokens=8192,
+        max_tokens=4096,
         max_retries=10,
         timeout=800,
     )

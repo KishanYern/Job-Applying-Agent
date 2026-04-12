@@ -48,9 +48,26 @@ def test_runpod_inference():
         response = llm.invoke("Hello, from the Job-Applying-Agent test script! Summarize in 10 words or less what you can do.")
         
         print("\n" + "="*30)
-        print("🎉 RESPONSE RECEIVED SUCCESSFULLY! 🎉")
+        print("[PASS] BASIC RESPONSE RECEIVED SUCCESSFULLY!")
         print("="*30)
         print(f"Content: {response.content}")
+        print("="*30)
+        
+        print("\nTesting Tool Calling Wrapper...")
+        from langchain_core.tools import tool
+        @tool
+        def get_weather(location: str, unit: str = "celsius") -> str:
+            """Get the current weather in a given location"""
+            return f"Sunny in {location}"
+            
+        llm_with_tools = llm.bind_tools([get_weather])
+        tool_resp = llm_with_tools.invoke("What is the weather like in Tokyo right now?")
+        
+        print("\n" + "="*30)
+        print("[PASS] TOOL CALL RECEIVED SUCCESSFULLY!")
+        print("="*30)
+        print(f"Content: {tool_resp.content}")
+        print(f"Tool Calls: {tool_resp.tool_calls}")
         print("="*30)
         
     except Exception as e:
