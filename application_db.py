@@ -416,7 +416,6 @@ class ApplicationDatabase:
         cursor.execute("SELECT COUNT(DISTINCT company) FROM applications")
         stats["unique_companies"] = cursor.fetchone()[0]
         
-        conn.close()
         return stats
     
     def count_applications(self, status: Optional[ApplicationStatus] = None) -> int:

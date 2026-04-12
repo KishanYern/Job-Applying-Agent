@@ -411,14 +411,14 @@ class DailySummaryScheduler:
         self._running = True
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
-        print(f"📅 Daily summary scheduler started (scheduled for {self.summary_time})")
+        print(f"[Daily] summary scheduler started (scheduled for {self.summary_time})")
     
     def stop(self) -> None:
         """Stop the scheduler."""
         self._running = False
         if self._thread:
             self._thread.join(timeout=2)
-        print("📅 Daily summary scheduler stopped")
+        print("[Daily] summary scheduler stopped")
     
     def _run_loop(self) -> None:
         """Main scheduler loop."""
@@ -562,4 +562,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Could not test daily summary: {e}")
     
-    print("\n✅ Notification tests complete!")
+    print("\n[OK] Notification tests complete!")

@@ -9,6 +9,9 @@ import asyncio
 import time
 from pathlib import Path
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Enable nested async event loops (required for Streamlit + async browser-use)
 import nest_asyncio
@@ -112,15 +115,6 @@ def init_session_state():
     # Session recovery
     if "pending_resume_session" not in st.session_state:
         st.session_state.pending_resume_session = None
-    # V2 API keys (loaded from env if present)
-    if "groq_api_key" not in st.session_state:
-        st.session_state.groq_api_key = os.environ.get("GROQ_API_KEY", "")
-    if "tavily_api_key" not in st.session_state:
-        st.session_state.tavily_api_key = os.environ.get("TAVILY_API_KEY", "")
-    if "runpod_endpoint_url" not in st.session_state:
-        st.session_state.runpod_endpoint_url = os.environ.get("RUNPOD_ENDPOINT_URL", "")
-    if "runpod_api_key" not in st.session_state:
-        st.session_state.runpod_api_key = os.environ.get("RUNPOD_API_KEY", "")
 
 
 def start_notification_scheduler():
@@ -164,23 +158,6 @@ def add_log(message: str, level: str = "info"):
     st.session_state.agent_logs.append(f"[{timestamp}] {icon} {message}")
 
 
-def _sync_api_keys_to_env():
-    """Push API keys from session state into environment variables for sub-modules.
-    
-    Trade-off: storing keys in os.environ makes them accessible to any code
-    running in this process. This is necessary because sub-modules (langchain,
-    groq, tavily) read keys from os.environ. If you're concerned about
-    dependency supply-chain attacks, audit requirements.txt carefully.
-    """
-    if st.session_state.get("groq_api_key"):
-        os.environ["GROQ_API_KEY"] = st.session_state.groq_api_key
-    if st.session_state.get("tavily_api_key"):
-        os.environ["TAVILY_API_KEY"] = st.session_state.tavily_api_key
-    if st.session_state.get("runpod_endpoint_url"):
-        os.environ["RUNPOD_ENDPOINT_URL"] = st.session_state.runpod_endpoint_url
-    if st.session_state.get("runpod_api_key"):
-        os.environ["RUNPOD_API_KEY"] = st.session_state.runpod_api_key
-
 
 async def run_agent_for_job(
     job_url: str,
@@ -193,7 +170,6 @@ async def run_agent_for_job(
 ) -> dict:
     """Run the Phase 2 job application agent for a single job."""
     try:
-        _sync_api_keys_to_env()
         from apply_agent import run_agent, resume_agent
 
         if resume_session_id:
@@ -222,91 +198,6 @@ def render_sidebar():
     with st.sidebar:
         st.header("⚙️ Configuration")
 
-        # ── API Keys ──────────────────────────────────────────────────────────
-        st.subheader("🔑 API Keys")
-        st.caption("Phase 1 (Discovery) uses Groq + Tavily. Phase 2 (Apply) uses your cloud GPU.")
-
-        groq_key = st.text_input(
-            "Groq API Key",
-            value=st.session_state.groq_api_key,
-            type="password",
-            help="Get a free key at console.groq.com — used for Llama-3.3-70B Phase 1 research",
-        )
-        if groq_key != st.session_state.groq_api_key:
-            st.session_state.groq_api_key = groq_key
-            os.environ["GROQ_API_KEY"] = groq_key
-
-        tavily_key = st.text_input(
-            "Tavily API Key",
-            value=st.session_state.tavily_api_key,
-            type="password",
-            help="Get a key at app.tavily.com — used for company research and fallback search",
-        )
-        if tavily_key != st.session_state.tavily_api_key:
-            st.session_state.tavily_api_key = tavily_key
-            os.environ["TAVILY_API_KEY"] = tavily_key
-
-        gpu_endpoint = st.text_input(
-            "Cloud GPU Endpoint URL",
-            value=st.session_state.runpod_endpoint_url,
-            placeholder="https://api.runpod.ai/v2/<id>/openai/v1",
-            help="RunPod or Vast.ai vLLM endpoint hosting Qwen2.5-Coder-32B",
-        )
-        if gpu_endpoint != st.session_state.runpod_endpoint_url:
-            st.session_state.runpod_endpoint_url = gpu_endpoint
-            os.environ["RUNPOD_ENDPOINT_URL"] = gpu_endpoint
-
-        gpu_key = st.text_input(
-            "Cloud GPU API Key",
-            value=st.session_state.runpod_api_key,
-            type="password",
-            help="RunPod / Vast.ai API key for Qwen2.5-Coder-32B Phase 2 inference",
-        )
-        if gpu_key != st.session_state.runpod_api_key:
-            st.session_state.runpod_api_key = gpu_key
-            os.environ["RUNPOD_API_KEY"] = gpu_key
-
-        # API key status indicators
-        api_ready = all([
-            st.session_state.groq_api_key,
-            st.session_state.tavily_api_key,
-            st.session_state.runpod_endpoint_url,
-            st.session_state.runpod_api_key,
-        ])
-        if api_ready:
-            st.success("✓ All API keys configured")
-        else:
-            missing = [
-                name for name, val in [
-                    ("Groq", st.session_state.groq_api_key),
-                    ("Tavily", st.session_state.tavily_api_key),
-                    ("GPU Endpoint", st.session_state.runpod_endpoint_url),
-                    ("GPU Key", st.session_state.runpod_api_key),
-                ]
-                if not val
-            ]
-            st.warning(f"Missing: {', '.join(missing)}")
-
-        st.divider()
-
-        # ── Active Model Info ─────────────────────────────────────────────────
-        st.subheader("🧠 Active Models")
-        phase1_ready = bool(st.session_state.groq_api_key and st.session_state.tavily_api_key)
-        phase2_ready = bool(st.session_state.runpod_endpoint_url and st.session_state.runpod_api_key)
-
-        p1_icon = "✅" if phase1_ready else "⚠️"
-        p2_icon = "✅" if phase2_ready else "⚠️"
-
-        st.markdown(
-            f"{p1_icon} **Phase 1** — Groq / `llama-3.3-70b-versatile`\n\n"
-            f"{p2_icon} **Phase 2** — `qwen2.5-coder-32b-instruct` (cloud GPU)"
-        )
-        if not phase1_ready:
-            st.caption("Set Groq + Tavily keys to enable Phase 1 research.")
-        if not phase2_ready:
-            st.caption("Set GPU Endpoint + Key to enable Phase 2 applications.")
-
-        st.divider()
         
         # Notification Settings
         st.header("🔔 Notifications")
@@ -396,24 +287,6 @@ def render_sidebar():
             
             st.divider()
         
-        # Profile Preview
-        st.header("👤 Your Profile")
-        profile_content = load_profile()
-        if profile_content:
-            with st.expander("View Profile Data", expanded=False):
-                st.text(profile_content[:2000] + "..." if len(profile_content) > 2000 else profile_content)
-            st.success("✓ Profile loaded")
-        else:
-            st.error("⚠️ my_profile.md not found!")
-        
-        # Resume status
-        resume_path = get_resume_path()
-        if resume_path:
-            st.success("✓ Resume found")
-        else:
-            st.error("⚠️ Resume not found!")
-        
-        st.divider()
         
         # Application Statistics
         st.header("📊 Stats")
@@ -447,6 +320,8 @@ def render_discover_tab():
     """Render the job discovery tab."""
     st.header("🔍 Discover Jobs")
     st.markdown("Find jobs from curated GitHub repositories (SimplifyJobs, Ouckah, pittcsc)")
+    
+    db = get_db()
     
     # Search filters
     col1, col2, col3 = st.columns(3)
@@ -486,7 +361,6 @@ def render_discover_tab():
         search_clicked = st.button("🔍 Search Jobs", use_container_width=True)
 
     if search_clicked:
-        _sync_api_keys_to_env()
         profile_content = load_profile() if run_phase1 else ""
         if run_phase1 and not profile_content:
             st.warning("my_profile.md not found — Phase 1 research skipped.")
@@ -651,7 +525,6 @@ def render_auto_apply_tab():
         col_disc1, col_disc2 = st.columns([1, 3])
         with col_disc1:
             if st.button("🔬 Run Discovery Now", use_container_width=True, type="secondary"):
-                _sync_api_keys_to_env()
                 profile_content = load_profile()
                 if not profile_content:
                     st.error("my_profile.md not found — cannot run research.")
@@ -780,7 +653,6 @@ def render_auto_apply_tab():
         
         # Run the agent
         try:
-            _sync_api_keys_to_env()
             # Check if we're resuming a session
             resume_session = st.session_state.get("pending_resume_session")
             if resume_session:
@@ -896,7 +768,6 @@ def render_manual_tab():
         button_label = "🔄 Re-apply Anyway" if is_duplicate else "🚀 Start Agent"
         
         if st.button(button_label, disabled=start_disabled, use_container_width=True):
-            _sync_api_keys_to_env()
             st.session_state.agent_running = True
             st.session_state.agent_logs = []
             add_log(f"Starting agent for: {job_url}", "action")
@@ -926,7 +797,6 @@ def render_manual_tab():
         # Resume button if there's a pending session
         resume_disabled = not st.session_state.pending_resume_session or st.session_state.agent_running
         if st.button("🔄 Resume Session", disabled=resume_disabled, use_container_width=True):
-            _sync_api_keys_to_env()
             st.session_state.agent_running = True
             add_log("Resuming session...", "action")
 
